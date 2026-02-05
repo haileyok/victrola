@@ -1,0 +1,231 @@
+/* Victrola TUI stylesheet */
+
+/* Session list screen */
+SessionListScreen {
+    layout: vertical;
+}
+
+SessionListScreen #startup-banner {
+    height: 1;
+    padding: 0 1;
+    background: $panel;
+    color: $text-muted;
+}
+
+SessionListScreen ListView {
+    height: 1fr;
+}
+
+/* System prompt screen */
+SystemPromptScreen {
+    layout: vertical;
+}
+
+SystemPromptScreen #prompt-body {
+    height: 1fr;
+    padding: 1 2;
+}
+
+SystemPromptScreen .prompt-text {
+    padding: 1 0;
+}
+
+SessionListScreen .empty-state {
+    text-align: center;
+    color: $text-muted;
+    padding: 4 2;
+}
+
+/* Chat screen */
+ChatScreen {
+    layout: vertical;
+}
+
+#chat-log {
+    height: 1fr;
+    scrollbar-size: 1 1;
+}
+
+#chat-input {
+    dock: bottom;
+    height: 3;
+    margin: 0 1;
+}
+
+/* Message bubbles */
+MessageBubble {
+    padding: 0 1;
+    margin: 1 0 0 0;
+}
+
+MessageBubble .role-label {
+    text-style: bold;
+}
+
+MessageBubble.user-message .role-label {
+    color: $accent;
+}
+
+MessageBubble.assistant-message .role-label {
+    color: $success;
+}
+
+MessageBubble.system-message .role-label {
+    color: $warning;
+}
+
+/* Tool activity blocks (inline code review) */
+ToolActivity {
+    height: auto;
+    margin: 0 1;
+}
+
+ToolActivity Collapsible {
+    background: $panel;
+    padding: 0;
+}
+
+ToolActivity.tool-activity-success Collapsible {
+    border-left: thick $success;
+}
+
+ToolActivity.tool-activity-error Collapsible {
+    border-left: thick $error;
+}
+
+ToolActivity .tool-code {
+    padding: 1 2;
+    background: $surface;
+}
+
+ToolActivity .tool-result {
+    padding: 1 2;
+    color: $text;
+}
+
+/* Pending-tool banner */
+#pending-banner {
+    dock: top;
+    height: 1;
+    padding: 0 1;
+    background: $warning 30%;
+    color: $warning;
+}
+
+#pending-banner.hidden {
+    display: none;
+}
+
+/* Tool detail screen */
+ToolDetailScreen {
+    layout: vertical;
+}
+
+ToolDetailScreen #tool-detail-body {
+    height: 1fr;
+    padding: 1 2;
+}
+
+ToolDetailScreen .tool-detail-code {
+    margin: 1 0;
+    padding: 1 2;
+    background: $surface;
+}
+
+/* Token stats bar */
+TokenStatsBar {
+    dock: bottom;
+    height: 1;
+    background: $accent 15%;
+    color: $text;
+    text-style: bold;
+    padding: 0 1;
+}
+
+/* Agent status bar */
+AgentStatusBar {
+    dock: bottom;
+    height: 1;
+    background: $surface;
+    color: $warning;
+    padding: 0 1;
+}
+
+AgentStatusBar.hidden {
+    display: none;
+}
+
+/* Tool list screen */
+ToolListScreen {
+    layout: vertical;
+}
+
+ToolListScreen ListView {
+    height: 1fr;
+}
+
+/* Secret list screen */
+SecretListScreen {
+    layout: vertical;
+}
+
+SecretListScreen ListView {
+    height: 1fr;
+}
+
+/* Secret input screen */
+SecretInputScreen {
+    layout: vertical;
+    padding: 2 4;
+}
+
+SecretInputScreen #name-label,
+SecretInputScreen #value-label {
+    margin: 1 0 0 0;
+}
+
+SecretInputScreen #hint-label {
+    margin: 1 0 0 0;
+    color: $text-muted;
+    text-style: italic;
+}
+
+SecretInputScreen Input {
+    margin: 0 0 1 0;
+}
+
+/* Schedule list screen */
+ScheduleListScreen {
+    layout: vertical;
+}
+
+ScheduleListScreen ListView {
+    height: 1fr;
+}
+
+/* Schedule input screen */
+ScheduleInputScreen {
+    layout: vertical;
+    padding: 2 4;
+}
+
+ScheduleInputScreen #name-label,
+ScheduleInputScreen #schedule-label,
+ScheduleInputScreen #prompt-label {
+    margin: 1 0 0 0;
+}
+
+ScheduleInputScreen #hint-label {
+    margin: 1 0 0 0;
+    color: $text-muted;
+    text-style: italic;
+}
+
+ScheduleInputScreen Input {
+    margin: 0 0 1 0;
+}
+
+ScheduleInputScreen TextArea {
+    height: 6;
+    margin: 0 0 1 0;
+}
