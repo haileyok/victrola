@@ -19,13 +19,25 @@ async def _get_note(ctx: ToolContext, rkey: str) -> dict[str, Any] | None:
 
 @TOOL_REGISTRY.tool(
     name="notes.note_upsert",
-    description="""Create or update a note by rkey (note name).
+    description="""Create or replace a note by rkey. **The `content` you pass REPLACES the entire note — there is no merging.**
 
-If the note does not yet exist (or exists but is empty), this creates/writes it normally. If the note **already has content**, the call is rejected unless you pass `overwrite: true` — this is a safety net so you don't clobber context you forgot to read.
+### Behavior
+- Note does not exist (or is empty) → created/written normally.
+- Note already has content → **rejected** unless you pass `overwrite: true`. This is a safety net so you don't clobber context you forgot about.
+- `overwrite: true` does NOT merge. Whatever you pass as `content` is what the note becomes.
 
-To add to an existing note: call `note_get` first, build the merged content, then call `note_upsert` again with `overwrite: true`. To genuinely replace an existing note wholesale, also pass `overwrite: true` (after confirming what's there).
+### How to ADD to a note without losing what's there
+There is no `append` tool — you do it yourself. For `self`/`operator` the current content is already in your system prompt, so just build the new content as:
 
-Conventional rkeys:
+```
+<existing content from system prompt>
+
+<your new addition>
+```
+
+…and call `note_upsert(..., overwrite=true)`. For other rkeys whose content isn't preloaded, `note_get` them first, then concat, then upsert.
+
+### Conventional rkeys
 - `self` — your identity, personality, and behavior instructions (loaded into your system prompt at boot)
 - `operator` — what you know about the human operator (preferences, context, ongoing projects)
 - `skill:<name>` — a reusable procedure you can load and execute
@@ -42,12 +54,12 @@ Rkey rules: 1-512 chars, alphanumeric with `-_.~:`""",
         ToolParameter(
             name="content",
             type="string",
-            description="The full note content.",
+            description="The full note content. REPLACES the existing note entirely — include any prior content you want to preserve.",
         ),
         ToolParameter(
             name="overwrite",
             type="boolean",
-            description="Required to replace an existing non-empty note. Default false — without this, the call is rejected if the note already has content, to prevent accidental clobbering.",
+            description="Must be true to replace an existing non-empty note. Default false — the call is rejected otherwise, to prevent accidental clobbering. Setting true does NOT merge; `content` still replaces the whole note.",
             required=False,
             default=False,
         ),
@@ -81,8 +93,9 @@ async def note_upsert(
         return (
             f"Rejected: note '{rkey}' already has {len(existing_content)} chars of content. "
             f"Preview: {preview}\n\n"
-            f"If you want to preserve it, call `note_get(['{rkey}'])`, merge your new content with the existing, then call note_upsert again with `overwrite: true`. "
-            f"If you genuinely intend to replace it wholesale, call note_upsert again with `overwrite: true`."
+            f"Call note_upsert again with `overwrite: true` to proceed. Remember: `overwrite: true` REPLACES the whole note — it does not merge. "
+            f"If you want to keep the existing content, prepend it to your new content before calling again "
+            f"(for `self`/`operator` the full current content is in your system prompt; for other notes, `note_get` first)."
         )
 
     if existed:
@@ -103,7 +116,7 @@ async def note_upsert(
     name="notes.note_get",
     description="""Retrieve the full content of one or more notes by rkey. Works for any rkey — `self`, `operator`, `skill:*`, `task:*`, or any free-form note name.
 
-The `self` and `operator` notes are already preloaded into your system prompt, so you normally don't need to re-fetch them — the one exception is just before calling `note_upsert` with `overwrite: true`, when you want to append without clobbering. For `skill:*` notes, only the name + short preview is in the system prompt, so you must `note_get` before executing a skill.
+The `self` and `operator` notes are preloaded into your system prompt, so you already have their content and don't need to fetch them. For `skill:*` notes, only the name + short preview is in the system prompt, so you must `note_get` before executing a skill. For any other note whose content isn't in your prompt, `note_get` before reasoning about it — and always `note_get` before calling `note_upsert` with `overwrite: true` if you want to preserve the prior content.
 
 Pass an array of rkeys to batch multiple reads into one call.""",
     parameters=[
