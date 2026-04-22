@@ -46,12 +46,12 @@ Every tool invocation goes through a real `execute_code` function call, every ti
 
 Your persistent memory lives in notes. Access them by calling `tools.notes.*` methods inside an `execute_code` block. **Keep memory up to date proactively — don't wait to be asked.**
 
-- When you learn a new fact, preference, or pattern about the operator, update the `operator` note immediately. Read it first (`tools.notes.note_get({rkeys: ['operator']})`) to append; don't overwrite unrelated context.
+- When you learn a new fact, preference, or pattern about the operator, update the `operator` note immediately. Read it first (`tools.notes.note_get({rkeys: ['operator']})`) to append; don't overwrite unrelated context. The updated operator note loads into your system prompt on the next turn automatically.
 - Feel free to update your own `self` note when you learn something about how to be more effective as an agent — a new preference the operator has about your behavior, a working pattern you've figured out, or a correction to your own instructions. This is how you evolve over time. The updated self note loads into your system prompt on the next turn automatically.
 - When you figure out a reusable procedure, save it as a `skill:<name>` note via `tools.notes.note_upsert`.
 - When working on a long-running task across sessions, keep a `task:<name>` note and update progress as you go.
 - When the operator corrects you or expresses a preference, that's almost always worth persisting.
-- At the start of a new session, if the topic touches on the operator's context, read `operator` via `tools.notes.note_get({rkeys: ['operator']})` before responding.
+- The `self` and `operator` notes are preloaded below in this prompt — you already have them in context; don't re-fetch unless you're about to edit (and need to append without clobbering).
 - Skills are listed by name in this prompt but their content is NOT preloaded — `tools.notes.note_get({rkeys: ['skill:name']})` before executing a skill.
 - Use `tools.notes.note_list` to discover what you've saved if you're unsure.
 
@@ -70,6 +70,14 @@ The following is your customizable self-document. It was loaded from the `self` 
 
 ## About Me
 {self_doc}
+"""
+
+OPERATOR_DOC_TEMPLATE = """
+# Operator Note
+Everything you currently know about the human operator you work for — preferences, timezone, ongoing projects, recurring context. Loaded from the `operator` note at startup. Edit it with `note_upsert("operator", ...)` when you learn something new; the update is picked up on the next turn.
+
+## About the Operator
+{operator_doc}
 """
 
 SKILLS_TEMPLATE = """
@@ -143,6 +151,7 @@ You can call multiple custom tools in a single `execute_code` block — just `aw
 
 def build_system_prompt(
     self_doc: str = "",
+    operator_doc: str = "",
     skills: str = "No skills installed yet.",
     tool_docs: str = "",
     secret_names: list[str] | None = None,
@@ -151,11 +160,16 @@ def build_system_prompt(
     """
     builds the system prompt from static instructions and per-agent content.
     Block 1: Static instructions (cached across calls)
-    Block 2: Per-agent dynamic content (self-doc, skills, tool docs)
+    Block 2: Per-agent dynamic content (self-doc, operator-doc, skills, tool docs)
     """
     parts = [AGENT_SYSTEM_PROMPT]
 
     parts.append(SELF_DOC_TEMPLATE.format(self_doc=self_doc or "(not yet configured)"))
+    parts.append(
+        OPERATOR_DOC_TEMPLATE.format(
+            operator_doc=operator_doc or "(not yet configured — learn about the operator and populate this note)"
+        )
+    )
 
     if skills:
         parts.append(SKILLS_TEMPLATE.format(skills=skills))

@@ -125,8 +125,9 @@ def _build_discord_bot(executor: ToolExecutor, agent: Agent):
 
 
 async def _load_system_prompt(tool_context: ToolContext, executor: ToolExecutor) -> str:
-    """Load self-note, skills, and tool docs into the system prompt."""
+    """Load self-note, operator-note, skills, and tool docs into the system prompt."""
     self_doc = ""
+    operator_doc = ""
     skills = "No skills installed yet."
 
     docs = tool_context._store.documents if tool_context._store else None
@@ -145,6 +146,21 @@ async def _load_system_prompt(tool_context: ToolContext, executor: ToolExecutor)
                 logger.info("No self-note found, using defaults")
             else:
                 logger.warning("Failed to load self-note: %s", e)
+
+    # load operator-note
+    if docs is not None:
+        try:
+            doc = await docs.get("operator")
+            operator_doc = doc.get("content", "")
+            if operator_doc:
+                logger.info("Loaded operator-note (%d chars)", len(operator_doc))
+            else:
+                logger.info("Operator-note exists but is empty")
+        except Exception as e:
+            if "not found" in str(e).lower():
+                logger.info("No operator-note found, using defaults")
+            else:
+                logger.warning("Failed to load operator-note: %s", e)
 
     # load skills list
     if docs is not None:
@@ -184,6 +200,7 @@ async def _load_system_prompt(tool_context: ToolContext, executor: ToolExecutor)
 
     return build_system_prompt(
         self_doc=self_doc,
+        operator_doc=operator_doc,
         skills=skills,
         tool_docs=tool_docs,
         secret_names=secret_names,

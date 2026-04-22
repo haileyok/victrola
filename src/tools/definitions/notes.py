@@ -21,7 +21,9 @@ async def _get_note(ctx: ToolContext, rkey: str) -> dict[str, Any] | None:
     name="notes.note_upsert",
     description="""Create or update a note by rkey (note name).
 
-Use this to persist information across sessions. If the note exists, it will be updated (overwritten); otherwise created. To append rather than overwrite, read the existing note first and write the combined content.
+If the note does not yet exist (or exists but is empty), this creates/writes it normally. If the note **already has content**, the call is rejected unless you pass `overwrite: true` — this is a safety net so you don't clobber context you forgot to read.
+
+To add to an existing note: call `note_get` first, build the merged content, then call `note_upsert` again with `overwrite: true`. To genuinely replace an existing note wholesale, also pass `overwrite: true` (after confirming what's there).
 
 Conventional rkeys:
 - `self` — your identity, personality, and behavior instructions (loaded into your system prompt at boot)
@@ -40,11 +42,20 @@ Rkey rules: 1-512 chars, alphanumeric with `-_.~:`""",
         ToolParameter(
             name="content",
             type="string",
-            description="The full note content (overwrites any existing content)",
+            description="The full note content.",
+        ),
+        ToolParameter(
+            name="overwrite",
+            type="boolean",
+            description="Required to replace an existing non-empty note. Default false — without this, the call is rejected if the note already has content, to prevent accidental clobbering.",
+            required=False,
+            default=False,
         ),
     ],
 )
-async def note_upsert(ctx: ToolContext, rkey: str, content: str) -> str:
+async def note_upsert(
+    ctx: ToolContext, rkey: str, content: str, overwrite: bool = False
+) -> str:
     if not rkey:
         return "Error: rkey is required"
     if not content:
@@ -53,25 +64,46 @@ async def note_upsert(ctx: ToolContext, rkey: str, content: str) -> str:
     docs = ctx.store.documents
     assert docs is not None
 
-    # try update first, fall back to create if not found
+    existed = False
+    existing_content = ""
     try:
-        await docs.update(rkey, content)
-        return f"Note '{rkey}' updated."
+        doc = await docs.get(rkey)
+        existed = True
+        existing_content = doc.get("content", "") or ""
     except Exception as e:
-        if "not found" in str(e).lower():
-            try:
-                await docs.create(rkey, content)
-                return f"Note '{rkey}' created."
-            except Exception as create_err:
-                return f"Error creating note: {create_err}"
-        return f"Error updating note: {e}"
+        if "not found" not in str(e).lower():
+            return f"Error reading note before upsert: {e}"
+
+    if existing_content and not overwrite:
+        preview = existing_content[:200].replace("\n", " ")
+        if len(existing_content) > 200:
+            preview += "…"
+        return (
+            f"Rejected: note '{rkey}' already has {len(existing_content)} chars of content. "
+            f"Preview: {preview}\n\n"
+            f"If you want to preserve it, call `note_get(['{rkey}'])`, merge your new content with the existing, then call note_upsert again with `overwrite: true`. "
+            f"If you genuinely intend to replace it wholesale, call note_upsert again with `overwrite: true`."
+        )
+
+    if existed:
+        try:
+            await docs.update(rkey, content)
+            return f"Note '{rkey}' updated."
+        except Exception as e:
+            return f"Error updating note: {e}"
+
+    try:
+        await docs.create(rkey, content)
+        return f"Note '{rkey}' created."
+    except Exception as e:
+        return f"Error creating note: {e}"
 
 
 @TOOL_REGISTRY.tool(
     name="notes.note_get",
     description="""Retrieve the full content of one or more notes by rkey. Works for any rkey — `self`, `operator`, `skill:*`, `task:*`, or any free-form note name.
 
-Call this to load full content before relying on a note. The system prompt only shows skill names with short previews — you must `note_get` to see a skill's actual content before executing it. The `operator` note is not preloaded at all — call `note_get(['operator'])` when you need to recall context about the operator.
+The `self` and `operator` notes are already preloaded into your system prompt, so you normally don't need to re-fetch them — the one exception is just before calling `note_upsert` with `overwrite: true`, when you want to append without clobbering. For `skill:*` notes, only the name + short preview is in the system prompt, so you must `note_get` before executing a skill.
 
 Pass an array of rkeys to batch multiple reads into one call.""",
     parameters=[
