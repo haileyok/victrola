@@ -16,6 +16,47 @@ from src.tools.executor import ToolExecutor
 
 logger = logging.getLogger(__name__)
 
+# Retry configuration for transient LLM API failures
+MAX_RETRIES = 3
+BASE_DELAY = 1.0  # seconds
+DELAY_FACTOR = 2.0
+MAX_DELAY = 30.0  # seconds
+
+
+def _is_retryable_status(status_code: int) -> bool:
+    """Return True for HTTP status codes that should trigger a retry."""
+    return status_code == 429 or status_code >= 500
+
+
+async def _retry_with_backoff(
+    coro_factory: Callable[[], Awaitable[Any]],
+    *,
+    is_retryable_exc: Callable[[Exception], bool],
+    max_retries: int = MAX_RETRIES,
+    base_delay: float = BASE_DELAY,
+) -> Any:
+    """Call coro_factory() with exponential backoff on retryable errors.
+
+    After exhausting retries, the original exception propagates.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return await coro_factory()
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= max_retries or not is_retryable_exc(exc):
+                raise
+            delay = min(base_delay * (DELAY_FACTOR ** attempt), MAX_DELAY)
+            logger.warning(
+                "LLM API call failed (attempt %d/%d), retrying in %.1fs: %s",
+                attempt + 1, max_retries + 1, delay, exc,
+            )
+            await asyncio.sleep(delay)
+    # Should not reach here, but satisfy the type checker
+    if last_exc:
+        raise last_exc
+
 
 @dataclass
 class AgentTextBlock:
@@ -54,6 +95,33 @@ class AgentClient(ABC):
         pass
 
 
+def _is_anthropic_retryable(exc: Exception) -> bool:
+    """Check if an Anthropic API exception should be retried."""
+    # Retry on overloaded errors and API status errors with retryable codes
+    from anthropic import APIStatusError, APIConnectionError, APITimeoutError
+
+    if isinstance(exc, (APIConnectionError, APITimeoutError)):
+        return True
+    if isinstance(exc, APIStatusError):
+        status = getattr(exc, "status_code", None)
+        if status is not None and _is_retryable_status(status):
+            return True
+    return False
+
+
+def _is_httpx_retryable(exc: Exception) -> bool:
+    """Check if an httpx exception should be retried."""
+    if isinstance(exc, (httpx.TransportError, httpx.TimeoutException)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = getattr(exc, "response", None)
+        if status is not None:
+            code = getattr(status, "status_code", None)
+            if code is not None and _is_retryable_status(code):
+                return True
+    return False
+
+
 class AnthropicClient(AgentClient):
     def __init__(
         self, api_key: str, model_name: str = "claude-sonnet-4-5-20250929"
@@ -86,8 +154,14 @@ class AnthropicClient(AgentClient):
             tools[-1]["cache_control"] = {"type": "ephemeral"}
             kwargs["tools"] = tools
 
-        async with self._client.messages.stream(**kwargs) as stream:  # type: ignore
-            msg = await stream.get_final_message()
+        async def _do_stream():
+            async with self._client.messages.stream(**kwargs) as stream:  # type: ignore
+                return await stream.get_final_message()
+
+        msg = await _retry_with_backoff(
+            _do_stream,
+            is_retryable_exc=_is_anthropic_retryable,
+        )
 
         content: list[AgentTextBlock | AgentToolUseBlock] = []
         for block in msg.content:
@@ -182,18 +256,24 @@ class OpenAICompatibleClient(AgentClient):
         if tools:
             payload["tools"] = self._convert_tools(tools)
 
-        resp = await self._http.post(
-            f"{self._endpoint}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
+        async def _do_post():
+            resp = await self._http.post(
+                f"{self._endpoint}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            if not resp.is_success:
+                logger.error("API error %d: %s", resp.status_code, resp.text[:1000])
+                resp.raise_for_status()
+            return resp.json()
+
+        data = await _retry_with_backoff(
+            _do_post,
+            is_retryable_exc=_is_httpx_retryable,
         )
-        if not resp.is_success:
-            logger.error("API error %d: %s", resp.status_code, resp.text[:1000])
-            resp.raise_for_status()
-        data = resp.json()
 
         return self._parse_response(data)
 
