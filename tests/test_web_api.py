@@ -552,6 +552,21 @@ class TestMemory:
         assert resp.json()["content"] == "new content"
         assert resp.json()["metadata"]["tags"] == ["keep-me"]
 
+    def test_update_empty_content_rejected(self, app_client):
+        """Empty/whitespace content on update is rejected."""
+        create = app_client.post("/api/memory", json={
+            "type": "factual", "scope": "topic", "content": "original",
+        })
+        entry_id = create.json()["id"]
+        resp = app_client.put(f"/api/memory/{entry_id}", json={
+            "content": "",
+        })
+        assert resp.status_code == 422
+        resp = app_client.put(f"/api/memory/{entry_id}", json={
+            "content": "   ",
+        })
+        assert resp.status_code == 422
+
     def test_delete(self, app_client):
         create = app_client.post("/api/memory", json={
             "type": "factual", "scope": "topic", "content": "to delete",

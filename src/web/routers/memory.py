@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.tools.executor import ToolExecutor
@@ -106,13 +107,11 @@ async def create_memory(
             content=body.content,
             metadata=metadata,
         )
-    except Exception as e:
+    except aiosqlite.IntegrityError:
         # Catch the race where two concurrent self-creates both pass
         # has_self_entry() — the DB partial unique index rejects the
         # second insert with an IntegrityError.
-        if "integrity" in str(e).lower() or "unique" in str(e).lower():
-            raise HTTPException(409, "A 'self' entry already exists. Use update instead.")
-        raise
+        raise HTTPException(409, "A 'self' entry already exists. Use update instead.")
     _invalidate_search(executor)
     return MemoryEntryResponse(**entry)
 
@@ -125,6 +124,8 @@ async def update_memory(
 ) -> MemoryEntryResponse:
     if body.content is None and body.tags is None:
         raise HTTPException(422, "At least one of 'content' or 'tags' must be provided")
+    if body.content is not None and not body.content.strip():
+        raise HTTPException(422, "Content cannot be empty")
     ms = _get_memory_store(executor)
 
     # Verify the entry exists before attempting update
