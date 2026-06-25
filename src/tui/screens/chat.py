@@ -1,5 +1,6 @@
 import logging
 import time
+from typing import Any
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -29,6 +30,7 @@ class ChatScreen(Screen):
         self.session_id = session_id
         self._current_tool_widget: ToolActivity | None = None
         self._llm_start_time: float | None = None
+        self._conversation: list[dict[str, Any]] = []
 
     def compose(self) -> ComposeResult:
         yield Header(name="Victrola Chat")
@@ -43,17 +45,12 @@ class ChatScreen(Screen):
 
     async def on_mount(self) -> None:
         conv_manager = self.app.conversation_manager  # type: ignore[attr-defined]
-        agent = self.app.agent  # type: ignore[attr-defined]
 
         if conv_manager:
             try:
                 messages = await conv_manager.load_session(self.session_id)
                 if messages:
-                    # Acquire agent's chat lock before touching _conversation so
-                    # we don't clobber a concurrent Discord/scheduler chat()'s
-                    # in-flight override.
-                    async with agent._chat_lock:
-                        agent._conversation = messages
+                    self._conversation = messages
                     chat_log = self.query_one("#chat-log", VerticalScroll)
                     for msg in messages:
                         role = msg.get("role", "user")
@@ -69,9 +66,6 @@ class ChatScreen(Screen):
                     chat_log.scroll_end(animate=False)
             except Exception:
                 logger.exception("Failed to load session history")
-        else:
-            async with agent._chat_lock:
-                agent._conversation = []
 
         self.query_one("#chat-input", Input).focus()
         await self._refresh_pending_banner()
@@ -152,7 +146,11 @@ class ChatScreen(Screen):
         input_widget = self.query_one("#chat-input", Input)
 
         try:
-            response = await agent.chat(user_text, on_event=self._on_agent_event)
+            response = await agent.chat(
+                user_text,
+                conversation=self._conversation,
+                on_event=self._on_agent_event,
+            )
             status_bar.hide()
 
             if response:
@@ -201,11 +199,7 @@ class ChatScreen(Screen):
             input_widget.focus()
 
     async def action_go_back(self) -> None:
-        agent = self.app.agent  # type: ignore[attr-defined]
-        # Lock so we don't clear _conversation while another surface's
-        # chat() is mid-flight using it.
-        async with agent._chat_lock:
-            agent._conversation = []
+        self._conversation = []
         self.app.pop_screen()
 
     def action_manage_tools(self) -> None:

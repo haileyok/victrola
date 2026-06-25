@@ -30,7 +30,8 @@ async def main():
         b64 = base64.b64encode(b'fake-png-bytes').decode('ascii')
 
         # 1. multi-block user message with image first, text last
-        await agent.chat('what is this?', images=[{'media_type': 'image/png', 'data': b64}])
+        conv1: list = []
+        await agent.chat('what is this?', conversation=conv1, images=[{'media_type': 'image/png', 'data': b64}])
         user_msg = captured[-1][-1]
         assert isinstance(user_msg['content'], list)
         assert user_msg['content'][0]['type'] == 'image'
@@ -39,7 +40,8 @@ async def main():
         print('pass 1: multi-block built (image first, text last)')
 
         # 2. plain string when no images
-        await agent.chat('just text')
+        conv2: list = []
+        await agent.chat('just text', conversation=conv2)
         assert isinstance(captured[-1][-1]['content'], str)
         print('pass 2: plain string when no images')
 

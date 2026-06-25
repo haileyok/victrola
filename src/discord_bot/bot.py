@@ -207,8 +207,6 @@ class DiscordBot:
         self._channel_name = channel_name
         self._agent = agent
         self._executor = executor
-        # serialize all agent.chat() calls — agent._conversation is shared state
-        self._chat_lock = asyncio.Lock()
 
         intents = discord.Intents.default()
         intents.message_content = True  # privileged; must also be enabled on Dev Portal
@@ -242,15 +240,14 @@ class DiscordBot:
         if thread is None:
             return  # not in our sessions channel
 
-        async with self._chat_lock:
+        try:
+            await self._handle_message(message, thread)
+        except Exception as e:
+            logger.exception("Discord message handling failed")
             try:
-                await self._handle_message(message, thread)
-            except Exception as e:
-                logger.exception("Discord message handling failed")
-                try:
-                    await thread.send(f"⚠️ Error: `{type(e).__name__}`: {e}")
-                except Exception:
-                    pass
+                await thread.send(f"⚠️ Error: `{type(e).__name__}`: {e}")
+            except Exception:
+                pass
 
     async def _resolve_thread(
         self, message: discord.Message
@@ -320,17 +317,17 @@ class DiscordBot:
             ),
         )
 
-        # load the full session conversation for agent context. agent.chat()
-        # swaps + restores `_conversation` atomically under its own lock, so
-        # we don't need manual snapshot/restore logic here.
+        # load the full session conversation for agent context. The agent
+        # no longer holds shared conversation state — each call mutates
+        # the passed list in place.
         loaded = await self._load_conversation(thread_id)
 
         tracker = _UsageTracker()
         async with thread.typing():
             response = await self._agent.chat(
                 user_text,
+                conversation=loaded,
                 on_event=tracker.on_event,
-                conversation_override=loaded,
                 images=images or None,
             )
 

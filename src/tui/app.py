@@ -123,11 +123,10 @@ class VictrolaApp(App):
             except Exception:
                 logger.exception("Failed to save scheduled prompt to session")
 
-        # run the scheduled prompt in an isolated conversation. agent.chat()
-        # swaps + restores _conversation internally under its lock, so no
-        # manual snapshot is needed.
+        # run the scheduled prompt in an isolated conversation owned by this
+        # fire — the agent no longer holds shared conversation state.
         try:
-            response = await self.agent.chat(tagged_prompt, conversation_override=[])
+            response = await self.agent.chat(tagged_prompt, conversation=[])
             logger.info(
                 "Schedule '%s' completed: %s",
                 task_name,
