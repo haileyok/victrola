@@ -1,5 +1,8 @@
+import asyncio
 import json
 import logging
+import os
+import tempfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -20,11 +23,17 @@ class SecretManager:
     async def load_secrets(self) -> None:
         """Load secrets from the local JSON file."""
         self._secrets.clear()
-        if not self._path.exists():
-            return
+
+        def _read():
+            if not self._path.exists():
+                return None
+            return self._path.read_text()
 
         try:
-            data = json.loads(self._path.read_text())
+            content = await asyncio.to_thread(_read)
+            if content is None:
+                return
+            data = json.loads(content)
             if isinstance(data, dict):
                 self._secrets = {k: v for k, v in data.items() if isinstance(v, str)}
         except (json.JSONDecodeError, OSError) as e:
@@ -32,10 +41,27 @@ class SecretManager:
 
         logger.info("Loaded %d secret(s)", len(self._secrets))
 
-    def _save(self) -> None:
-        """Persist secrets to disk."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(self._secrets, indent=2) + "\n")
+    async def _save(self) -> None:
+        """Persist secrets to disk atomically (tempfile + os.replace)."""
+        def _write():
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            # Atomic write: write to temp file then rename
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(self._path.parent), suffix=".tmp"
+            )
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.write(json.dumps(self._secrets, indent=2) + "\n")
+                os.replace(tmp_path, str(self._path))
+            except Exception:
+                # Clean up the temp file on failure
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+
+        await asyncio.to_thread(_write)
 
     def list_secret_names(self) -> list[str]:
         """Return secret names only (never values)."""
@@ -48,7 +74,7 @@ class SecretManager:
     async def set_secret(self, name: str, value: str) -> str:
         """Create or update a secret."""
         self._secrets[name] = value
-        self._save()
+        await self._save()
         return f"Secret '{name}' saved."
 
     async def delete_secret(self, name: str) -> str:
@@ -56,5 +82,5 @@ class SecretManager:
         if name not in self._secrets:
             return f"Secret '{name}' not found."
         del self._secrets[name]
-        self._save()
+        await self._save()
         return f"Secret '{name}' deleted."
