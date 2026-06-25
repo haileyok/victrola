@@ -26,6 +26,11 @@ class StoreNotFound(Exception):
     """
 
 
+class StoreConflict(Exception):
+    """Raised when a create call collides with an existing row
+    (duplicate primary key / IntegrityError)."""
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -126,7 +131,7 @@ class DocumentStore:
             await self._db.commit()
         except aiosqlite.IntegrityError as e:
             await self._db.rollback()
-            raise StoreNotFound(f"agent_document '{rkey}' already exists") from e
+            raise StoreConflict(f"agent_document '{rkey}' already exists") from e
         except Exception:
             await self._db.rollback()
             raise
@@ -243,7 +248,7 @@ class RecordStore:
             await self._db.commit()
         except aiosqlite.IntegrityError as e:
             await self._db.rollback()
-            raise StoreNotFound(
+            raise StoreConflict(
                 f"private_record '{collection}/{rkey}' already exists"
             ) from e
         except Exception:

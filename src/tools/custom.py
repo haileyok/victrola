@@ -172,8 +172,8 @@ class CustomToolManager:
         try:
             await self._store.documents.create(rkey, content)
         except Exception as e:
-            msg = str(e).lower()
-            if "already exists" in msg or "conflict" in msg:
+            from src.store.store import StoreConflict
+            if isinstance(e, StoreConflict):
                 await self._store.documents.update(rkey, content)
             else:
                 raise
