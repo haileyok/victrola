@@ -43,21 +43,25 @@ class ToolExecutor:
         await store.initialize()
         self._ctx._store = store
 
-        # initialize secrets and scheduler (local file storage)
+        # initialize secrets (local file storage)
         try:
             from src.tools.secrets import SecretManager
 
             self._secret_manager = SecretManager(path=data_dir / "secrets.json")
             await self._secret_manager.load_secrets()
             self._ctx._secret_manager = self._secret_manager
+        except Exception:
+            logger.warning("Failed to initialize secrets", exc_info=True)
 
+        # initialize scheduler (local file storage)
+        try:
             from src.scheduler.scheduler import Scheduler
 
             self._scheduler = Scheduler(path=data_dir / "schedules.json")
             await self._scheduler.load_tasks()
             self._ctx._scheduler = self._scheduler
         except Exception:
-            logger.warning("Failed to initialize secrets/scheduler", exc_info=True)
+            logger.warning("Failed to initialize scheduler", exc_info=True)
 
         # initialize custom tool manager (local store)
         try:
