@@ -179,7 +179,13 @@ async def _send_default_notification(
                 if title
                 else {"content": message[:2000]}
             )
-            await executor.ctx.http_client.post(webhook_url, json=payload)
+            resp = await executor.ctx.http_client.post(webhook_url, json=payload)
+            if resp.status_code >= 400:
+                logger.error(
+                    "Scheduled Discord notification failed: HTTP %d — %s",
+                    resp.status_code,
+                    resp.text[:200],
+                )
         except Exception:
             logger.exception("Failed to send scheduled notification via Discord")
 

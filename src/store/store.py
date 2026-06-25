@@ -628,7 +628,10 @@ class ChatStore:
     async def get_compaction_checkpoint(self, session_id: str) -> dict[str, Any] | None:
         """Return the latest compaction summary and checkpoint ID for a session.
 
-        Returns None when no compaction has been recorded yet.
+        Returns None when no compaction has been recorded yet. Selects the
+        summary row whose ``compacted_up_to_msg_id`` matches the session's
+        checkpoint column, rather than blindly trusting ``ORDER BY id DESC``,
+        to avoid pairing the checkpoint with a stale/wrong summary row.
         """
         cur = await self._db.execute(
             "SELECT compacted_up_to_msg_id FROM chat_sessions WHERE rkey = ?",
@@ -637,11 +640,13 @@ class ChatStore:
         row = await cur.fetchone()
         if not row or row[0] is None:
             return None
+        checkpoint_id = row[0]
         cur = await self._db.execute(
             "SELECT summary, compacted_up_to_msg_id, created_at "
-            "FROM chat_compaction_summaries WHERE session_id = ? "
+            "FROM chat_compaction_summaries "
+            "WHERE session_id = ? AND compacted_up_to_msg_id = ? "
             "ORDER BY id DESC LIMIT 1",
-            (session_id,),
+            (session_id, checkpoint_id),
         )
         row = await cur.fetchone()
         if not row:
