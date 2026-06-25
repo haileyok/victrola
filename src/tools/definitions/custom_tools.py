@@ -66,7 +66,7 @@ Use `list_available_secrets` to see what secrets the operator has configured. Re
         ToolParameter(
             name="secrets",
             type="array",
-            description="Optional list of environment variable names to inject into the Deno process.",
+            description="Optional list of secret names to inject as environment variables into the Deno process. Secrets are injected under their exact configured name (e.g. a secret named 'my_api_key' is accessed via Deno.env.get('my_api_key')).",
             required=False,
         ),
         ToolParameter(
