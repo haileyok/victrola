@@ -9,10 +9,10 @@ const { mockApi, ApiError } = vi.hoisted(() => ({
     getStatus: vi.fn(), listSessions: vi.fn(), createSession: vi.fn(),
     getSession: vi.fn(), deleteSession: vi.fn(), listMessages: vi.fn(),
     chat: vi.fn(), listTools: vi.fn(), getTool: vi.fn(), approveTool: vi.fn(),
-    revokeTool: vi.fn(), deleteTool: vi.fn(), listSecrets: vi.fn(),
-    setSecret: vi.fn(), deleteSecret: vi.fn(), listSchedules: vi.fn(),
-    createSchedule: vi.fn(), enableSchedule: vi.fn(), disableSchedule: vi.fn(),
-    deleteSchedule: vi.fn(), getSystemPrompt: vi.fn(),
+    revokeTool: vi.fn(), deleteTool: vi.fn(), testTool: vi.fn(),
+    listSecrets: vi.fn(), setSecret: vi.fn(), deleteSecret: vi.fn(),
+    listSchedules: vi.fn(), createSchedule: vi.fn(), enableSchedule: vi.fn(),
+    disableSchedule: vi.fn(), deleteSchedule: vi.fn(), getSystemPrompt: vi.fn(),
   },
   ApiError: class ApiError extends Error {
     status: number; detail: unknown;

@@ -26,6 +26,13 @@ class CreateScheduleRequest(BaseModel):
     name: str
     schedule: str
     prompt: str
+    condition_code: str | None = None
+    requires_net: bool = False
+    secrets: list[str] = []
+
+
+class TestCodeRequest(BaseModel):
+    params: dict = {}
 
 
 # -- response models --
@@ -59,6 +66,7 @@ class StatusResponse(BaseModel):
     model: str
     discord: bool
     schedules: int
+    schedules_pending: int = 0
     secrets: int
     custom_tools_approved: int
     custom_tools_pending: int
@@ -94,6 +102,10 @@ class ScheduleResponse(BaseModel):
     enabled: bool
     last_run: str | None = None
     next_run: str | None = None
+    condition_code: str | None = None
+    requires_net: bool = False
+    secrets: list[str] = []
+    approved: bool = False
 
 
 class SystemPromptResponse(BaseModel):

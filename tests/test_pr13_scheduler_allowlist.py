@@ -7,12 +7,17 @@ from src.scheduler.scheduler import Scheduler, ScheduledTask
 
 
 @pytest.fixture
-def scheduler_with_task(tmp_path):
-    """Create a scheduler with a test task."""
-    s = Scheduler(path=tmp_path / "schedules.json")
+async def scheduler_with_task(tmp_path):
+    """Create a scheduler with a test task backed by a real DocumentStore."""
+    from src.store.store import Store
+
+    store = Store(path=tmp_path / "test.db")
+    await store.initialize()
+    s = Scheduler(store=store.documents)
     task = ScheduledTask(name="test", schedule="interval:1h", prompt="hello")
     s._tasks["test"] = task
-    return s, task
+    yield s, task
+    await store.close()
 
 
 @pytest.mark.asyncio
@@ -52,11 +57,16 @@ async def test_update_task_skips_none_values(scheduler_with_task):
 @pytest.mark.asyncio
 async def test_update_task_not_found(tmp_path):
     """update_task should return not found for unknown task."""
-    s = Scheduler(path=tmp_path / "schedules.json")
+    from src.store.store import Store
+
+    store = Store(path=tmp_path / "test.db")
+    await store.initialize()
+    s = Scheduler(store=store.documents)
 
     result = await s.update_task("nonexistent", prompt="test")
 
     assert "not found" in result.lower()
+    await store.close()
 
 
 @pytest.mark.asyncio

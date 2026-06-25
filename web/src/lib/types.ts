@@ -28,6 +28,7 @@ export interface Status {
   model: string;
   discord: boolean;
   schedules: number;
+  schedules_pending: number;
   secrets: number;
   custom_tools_approved: number;
   custom_tools_pending: number;
@@ -63,6 +64,10 @@ export interface Schedule {
   enabled: boolean;
   last_run: string | null;
   next_run: string | null;
+  condition_code: string | null;
+  requires_net: boolean;
+  secrets: string[];
+  approved: boolean;
 }
 
 export interface SystemPrompt {

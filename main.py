@@ -116,6 +116,22 @@ def _wire_scheduler(executor: ToolExecutor, agent: Agent) -> None:
 
         executor.scheduler._on_fire = on_schedule_fire
 
+        async def run_condition(
+            code: str, requires_net: bool, secrets: list[str]
+        ) -> dict[str, Any]:
+            env: dict[str, str] = {}
+            sm = executor.secret_manager
+            if sm:
+                for name in secrets:
+                    val = sm.get_secret(name)
+                    if val:
+                        env[name.upper()] = val
+            return await executor.execute_condition_code(
+                code=code, env=env, allow_net=requires_net
+            )
+
+        executor.scheduler._condition_runner = run_condition
+
 
 def _build_discord_bot(executor: ToolExecutor, agent: Agent):
     """Return a DiscordBot if DISCORD_BOT_TOKEN is configured, else None."""

@@ -8,10 +8,11 @@ const { mockApi, ApiError } = vi.hoisted(() => ({
     getStatus: vi.fn(), listSessions: vi.fn(), createSession: vi.fn(),
     getSession: vi.fn(), deleteSession: vi.fn(), listMessages: vi.fn(),
     chat: vi.fn(), listTools: vi.fn(), getTool: vi.fn(), approveTool: vi.fn(),
-    revokeTool: vi.fn(), deleteTool: vi.fn(), listSecrets: vi.fn(),
-    setSecret: vi.fn(), deleteSecret: vi.fn(), listSchedules: vi.fn(),
-    createSchedule: vi.fn(), enableSchedule: vi.fn(), disableSchedule: vi.fn(),
-    deleteSchedule: vi.fn(), getSystemPrompt: vi.fn(),
+    revokeTool: vi.fn(), deleteTool: vi.fn(), testTool: vi.fn(),
+    listSecrets: vi.fn(), setSecret: vi.fn(), deleteSecret: vi.fn(),
+    listSchedules: vi.fn(), createSchedule: vi.fn(), enableSchedule: vi.fn(),
+    disableSchedule: vi.fn(), deleteSchedule: vi.fn(), approveSchedule: vi.fn(),
+    revokeSchedule: vi.fn(), testSchedule: vi.fn(), getSystemPrompt: vi.fn(),
   },
   ApiError: class ApiError extends Error {
     status: number; detail: unknown;
@@ -76,7 +77,7 @@ describe("SchedulesView", () => {
     fireEvent.click(screen.getByText("New"));
     await waitFor(() => expect(screen.getByText("Create")).toBeInTheDocument());
     fireEvent.click(screen.getByText("Create"));
-    expect(screen.getByText("All fields are required")).toBeInTheDocument();
+    expect(screen.getByText("Name, schedule, and prompt are required")).toBeInTheDocument();
   });
 
   it("creates a schedule with all fields filled", async () => {
@@ -88,6 +89,15 @@ describe("SchedulesView", () => {
     fireEvent.change(screen.getByPlaceholderText(/30m/), { target: { value: "1h" } });
     fireEvent.change(screen.getByPlaceholderText("Instruction for the agent…"), { target: { value: "Do something" } });
     fireEvent.click(screen.getByText("Create"));
-    await waitFor(() => expect(api.createSchedule).toHaveBeenCalledWith("my_task", "1h", "Do something"));
+    await waitFor(() =>
+      expect(api.createSchedule).toHaveBeenCalledWith(
+        "my_task",
+        "1h",
+        "Do something",
+        undefined,
+        undefined,
+        undefined,
+      ),
+    );
   });
 });

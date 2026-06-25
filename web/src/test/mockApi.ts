@@ -56,6 +56,7 @@ export const mockStatus: Status = {
   model: "claude-sonnet-4-5",
   discord: true,
   schedules: 3,
+  schedules_pending: 1,
   secrets: 5,
   custom_tools_approved: 2,
   custom_tools_pending: 1,
@@ -138,6 +139,10 @@ export const mockSchedules: Schedule[] = [
     enabled: true,
     last_run: "2024-01-01T09:00:00.000Z",
     next_run: "2024-01-02T09:00:00.000Z",
+    condition_code: null,
+    requires_net: false,
+    secrets: [],
+    approved: false,
   },
   {
     name: "weekly_cleanup",
@@ -146,6 +151,10 @@ export const mockSchedules: Schedule[] = [
     enabled: false,
     last_run: null,
     next_run: null,
+    condition_code: null,
+    requires_net: false,
+    secrets: [],
+    approved: false,
   },
 ];
 
