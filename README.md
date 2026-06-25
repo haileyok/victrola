@@ -115,6 +115,48 @@ SUB_MODEL_API=anthropic
 SUB_MODEL_NAME=claude-haiku-4-5-20251001
 ```
 
+## Umans AI (optional)
+
+[Umans AI](https://app.umans.ai) is a subscription-based inference provider with an Anthropic-compatible endpoint. To use it:
+
+```env
+MODEL_API=umans
+MODEL_API_KEY=sk-...
+MODEL_NAME=umans-glm-5.2
+```
+
+Available models include `umans-glm-5.2`, `umans-kimi-k2.7`, `umans-coder`, and `umans-flash`.
+
+### Server-side web search
+
+Umans can run web search server-side via the `X-Umans-Websearch-Provider` header. Set `UMANS_WEBSEARCH_PROVIDER` to `exa`, `native`, or `none` (default):
+
+```env
+UMANS_WEBSEARCH_PROVIDER=exa
+```
+
+When set to `exa` or `native`, a `web_search` tool is sent to the model alongside `execute_code`. Umans intercepts it server-side on models that support the Umans-owned search step. On models where the header is a no-op, the tool falls back to the local `exa-py` client (requires `EXA_API_KEY`).
+
+When set to `none` (default), web search works through the existing `execute_code` → Deno sandbox → `exa-py` path.
+
+### Sub-agent via Umans
+
+```env
+SUB_MODEL_API=umans
+SUB_MODEL_NAME=umans-flash
+SUB_MODEL_API_KEY=sk-...
+```
+
+The sub-agent endpoint defaults to `https://api.code.umans.ai` when `SUB_MODEL_API=umans` and no explicit `SUB_MODEL_ENDPOINT` is set.
+
+### Custom endpoint
+
+Override the Umans API base URL if needed:
+
+```env
+UMANS_ENDPOINT=https://api.code.umans.ai
+```
+
 ## Usage
 
 ```bash

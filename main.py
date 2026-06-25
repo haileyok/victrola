@@ -7,7 +7,10 @@ import click
 import httpx
 
 from src.agent.agent import Agent
-from src.agent.config_utils import resolve_sub_agent_key as _resolve_sub_agent_key
+from src.agent.config_utils import (
+    resolve_sub_agent_endpoint as _resolve_sub_agent_endpoint,
+    resolve_sub_agent_key as _resolve_sub_agent_key,
+)
 from src.agent.prompt import build_system_prompt
 from src.config import CONFIG
 from src.tools.executor import ToolExecutor
@@ -45,7 +48,7 @@ def shared_options[F: Callable[..., object]](func: F) -> F:
 
 
 def build_services(
-    model_api: Literal["anthropic", "openai", "openapi"] | None,
+    model_api: Literal["anthropic", "openai", "openapi", "umans"] | None,
     model_name: str | None,
     model_api_key: str | None,
     model_endpoint: str | None,
@@ -60,19 +63,23 @@ def build_services(
 
     from src.agent.llm import SubAgentLLM
 
+    effective_model_api = model_api or CONFIG.model_api
+    effective_model_api_key = model_api_key or CONFIG.model_api_key
+
     sub_api_key = _resolve_sub_agent_key(
-        model_api=CONFIG.model_api,
-        model_api_key=CONFIG.model_api_key,
+        model_api=effective_model_api,
+        model_api_key=effective_model_api_key,
         sub_model_api=CONFIG.sub_model_api,
         sub_model_api_key=CONFIG.sub_model_api_key,
     )
     llm_client = None
     if sub_api_key:
+        sub_endpoint = _resolve_sub_agent_endpoint()
         llm_client = SubAgentLLM(
             api=CONFIG.sub_model_api,
             model=CONFIG.sub_model_name,
             api_key=sub_api_key,
-            endpoint=CONFIG.sub_model_endpoint or None,
+            endpoint=sub_endpoint,
         )
 
     tool_context = ToolContext(
@@ -87,12 +94,17 @@ def build_services(
     )
 
     agent = Agent(
-        model_api=model_api or CONFIG.model_api,
+        model_api=effective_model_api,
         model_name=model_name or CONFIG.model_name,
         model_api_key=model_api_key or CONFIG.model_api_key,
         model_endpoint=model_endpoint or CONFIG.model_endpoint or None,
         tool_executor=executor,
         sub_llm_client=llm_client,
+        umans_websearch_provider=(
+            CONFIG.umans_websearch_provider
+            if effective_model_api == "umans"
+            else "none"
+        ),
     )
 
     return executor, agent
@@ -132,7 +144,9 @@ def _build_discord_bot(executor: ToolExecutor, agent: Agent):
     )
 
 
-async def _load_system_prompt(tool_context: ToolContext, executor: ToolExecutor) -> str:
+async def _load_system_prompt(
+    tool_context: ToolContext, executor: ToolExecutor, agent: Agent
+) -> str:
     """Load self-note, operator-note, skills, and tool docs into the system prompt."""
     self_doc = ""
     operator_doc = ""
@@ -213,6 +227,7 @@ async def _load_system_prompt(tool_context: ToolContext, executor: ToolExecutor)
         tool_docs=tool_docs,
         secret_names=secret_names,
         custom_tools_list=custom_tools_list,
+        native_web_search=agent.native_web_search_enabled,
     )
 
 
@@ -224,7 +239,7 @@ def cli():
 @cli.command()
 @shared_options
 def main(
-    model_api: Literal["anthropic", "openai", "openapi"] | None,
+    model_api: Literal["anthropic", "openai", "openapi", "umans"] | None,
     model_name: str | None,
     model_api_key: str | None,
     model_endpoint: str | None,
@@ -242,7 +257,7 @@ def main(
             _wire_scheduler(executor, agent)
 
             async def _refresh_prompt() -> str:
-                return await _load_system_prompt(executor.ctx, executor)
+                return await _load_system_prompt(executor.ctx, executor, agent)
 
             agent.system_prompt_provider = _refresh_prompt
             agent.system_prompt = await _refresh_prompt()
@@ -266,7 +281,7 @@ def main(
 @cli.command(name="chat")
 @shared_options
 def chat(
-    model_api: Literal["anthropic", "openai", "openapi"] | None,
+    model_api: Literal["anthropic", "openai", "openapi", "umans"] | None,
     model_name: str | None,
     model_api_key: str | None,
     model_endpoint: str | None,
@@ -283,7 +298,7 @@ def chat(
             await executor.initialize()
 
             async def _refresh_prompt() -> str:
-                return await _load_system_prompt(executor.ctx, executor)
+                return await _load_system_prompt(executor.ctx, executor, agent)
 
             agent.system_prompt_provider = _refresh_prompt
             agent.system_prompt = await _refresh_prompt()
@@ -315,7 +330,7 @@ def chat(
 @cli.command(name="serve")
 @shared_options
 def serve(
-    model_api: Literal["anthropic", "openai", "openapi"] | None,
+    model_api: Literal["anthropic", "openai", "openapi", "umans"] | None,
     model_name: str | None,
     model_api_key: str | None,
     model_endpoint: str | None,
@@ -333,7 +348,7 @@ def serve(
             _wire_scheduler(executor, agent)
 
             async def _refresh_prompt() -> str:
-                return await _load_system_prompt(executor.ctx, executor)
+                return await _load_system_prompt(executor.ctx, executor, agent)
 
             agent.system_prompt_provider = _refresh_prompt
             agent.system_prompt = await _refresh_prompt()

@@ -1,6 +1,8 @@
-"""Shared configuration helpers for sub-agent key resolution."""
+"""Shared configuration helpers for sub-agent key and endpoint resolution."""
 
 import logging
+
+from src.config import CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -31,3 +33,22 @@ def resolve_sub_agent_key(
         model_api,
     )
     return None
+
+
+def resolve_sub_agent_endpoint() -> str | None:
+    """Resolve the sub-agent endpoint, defaulting to the Umans endpoint when needed.
+
+    - If SUB_MODEL_ENDPOINT is set, use it.
+    - If SUB_MODEL_API is "umans" and no explicit endpoint, default to CONFIG.umans_endpoint.
+    - Otherwise, return None (SDK/provider defaults apply).
+    """
+    endpoint = CONFIG.sub_model_endpoint or None
+    if endpoint is None and CONFIG.sub_model_api == "umans":
+        endpoint = CONFIG.umans_endpoint or None
+        if endpoint is None:
+            raise ValueError(
+                "umans_endpoint is required when sub_model_api is 'umans' "
+                "and no explicit sub_model_endpoint is set "
+                "(set UMANS_ENDPOINT or SUB_MODEL_ENDPOINT in .env)"
+            )
+    return endpoint

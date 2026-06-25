@@ -5,8 +5,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Config(BaseSettings):
     # model config
-    model_api: Literal["anthropic", "openai", "openapi"] = "anthropic"
-    """the model api to use. must be one of `anthropic`, `openai`, or `openapi`"""
+    model_api: Literal["anthropic", "openai", "openapi", "umans"] = "anthropic"
+    """the model api to use. must be one of `anthropic`, `openai`, `openapi`, or `umans`"""
     model_name: str = "claude-sonnet-4-5-20250929"
     """the model to use with the given api"""
     model_api_key: str = ""
@@ -15,7 +15,7 @@ class Config(BaseSettings):
     """for openapi model apis, the endpoint to use"""
 
     # sub-agent model config (for summarize, research tools)
-    sub_model_api: Literal["anthropic", "openai", "openapi"] = "anthropic"
+    sub_model_api: Literal["anthropic", "openai", "openapi", "umans"] = "anthropic"
     """the model api for sub-agent tasks"""
     sub_model_name: str = "claude-haiku-4-5-20251001"
     """the model for sub-agent tasks (default: Haiku for speed/cost)"""
@@ -46,6 +46,12 @@ class Config(BaseSettings):
     # exa web search
     exa_api_key: str = ""
     """api key for Exa web search"""
+
+    # umans
+    umans_endpoint: str = "https://api.code.umans.ai"
+    """base url for the umans api"""
+    umans_websearch_provider: Literal["exa", "native", "none"] = "none"
+    """when using umans model api, the web search provider to use server-side"""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

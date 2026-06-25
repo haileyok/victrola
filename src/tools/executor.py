@@ -65,6 +65,10 @@ class ToolExecutor:
     def ctx(self) -> ToolContext:
         return self._ctx
 
+    @property
+    def registry(self) -> ToolRegistry:
+        return self._registry
+
     async def initialize(self) -> None:
         from src.config import CONFIG
 
