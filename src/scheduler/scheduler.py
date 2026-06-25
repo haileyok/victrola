@@ -119,23 +119,39 @@ class Scheduler:
         next_run = task.config.next_run(datetime.now(timezone.utc))
         return f"Schedule '{task.name}' created ({task.config}). Next run: {next_run.strftime('%Y-%m-%d %H:%M UTC')}."
 
+    ALLOWED_UPDATE_FIELDS = {"schedule", "prompt", "enabled", "last_run"}
+
     async def update_task(self, name: str, **fields: Any) -> str:
         """Update an existing scheduled task."""
         task = self._tasks.get(name)
         if task is None:
             return f"Schedule '{name}' not found."
 
+        skipped = []
         for key, value in fields.items():
+            if key not in self.ALLOWED_UPDATE_FIELDS:
+                skipped.append(key)
+                continue
             if value is not None:
                 setattr(task, key, value)
 
+        if skipped:
+            logger.warning(
+                "update_task('%s') ignored unknown field(s): %s",
+                name,
+                ", ".join(skipped),
+            )
+
         # re-validate and clear cache if schedule changed
-        if "schedule" in fields:
+        if "schedule" in fields and "schedule" in self.ALLOWED_UPDATE_FIELDS:
             task._config = None
             _ = task.config
 
         self._save()
-        return f"Schedule '{name}' updated."
+        msg = f"Schedule '{name}' updated."
+        if skipped:
+            msg += f" Ignored unknown field(s): {', '.join(skipped)}."
+        return msg
 
     async def delete_task(self, name: str) -> str:
         """Delete a scheduled task."""
