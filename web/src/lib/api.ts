@@ -208,6 +208,7 @@ export const api = {
     url?: string;
     command?: string;
     args?: string[];
+    auth_type?: string;
     auth_token_secret?: string;
     env_secrets?: string[];
     enabled?: boolean;
@@ -250,5 +251,10 @@ export const api = {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tool_name: toolName }),
       },
+    ),
+  deauthorizeMCPOAuth: (name: string) =>
+    fetchJSON<{ message: string }>(
+      `${API_BASE}/mcp/servers/${enc(name)}/oauth/deauthorize`,
+      { method: "POST" },
     ),
 };

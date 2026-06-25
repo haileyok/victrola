@@ -27,6 +27,7 @@ export function MCPView() {
   const [url, setUrl] = useState("");
   const [command, setCommand] = useState("");
   const [args, setArgs] = useState("");
+  const [authType, setAuthType] = useState<"none" | "bearer" | "oauth">("none");
   const [authTokenSecret, setAuthTokenSecret] = useState("");
   const [envSecrets, setEnvSecrets] = useState("");
   const [creating, setCreating] = useState(false);
@@ -56,7 +57,8 @@ export function MCPView() {
         url: transport === "sse" ? url || undefined : undefined,
         command: transport === "stdio" ? command || undefined : undefined,
         args: transport === "stdio" && args ? args.split(/\s+/) : [],
-        auth_token_secret: authTokenSecret || undefined,
+        auth_type: authType,
+        auth_token_secret: (authType === "bearer" && authTokenSecret) ? authTokenSecret : undefined,
         env_secrets: transport === "stdio" && envSecrets ? envSecrets.split(",").map((s) => s.trim()).filter(Boolean) : [],
         enabled: true,
       });
@@ -65,6 +67,7 @@ export function MCPView() {
       setUrl("");
       setCommand("");
       setArgs("");
+      setAuthType("none");
       setAuthTokenSecret("");
       setEnvSecrets("");
       await refresh();
@@ -190,14 +193,49 @@ export function MCPView() {
               </>
             )}
             <div>
-              <label className="text-sm font-medium">Auth Token Secret Name (optional)</label>
-              <Input
-                value={authTokenSecret}
-                onChange={(e) => setAuthTokenSecret(e.target.value)}
-                placeholder="e.g. FASTMAIL_API_TOKEN"
-              />
-              <p className="text-xs text-muted-foreground mt-1">Resolved from the Secrets store at connection time.</p>
+              <label className="text-sm font-medium">Authentication</label>
+              <div className="flex gap-2 mt-1">
+                <Button
+                  size="sm"
+                  variant={authType === "none" ? "default" : "outline"}
+                  onClick={() => setAuthType("none")}
+                >
+                  None
+                </Button>
+                <Button
+                  size="sm"
+                  variant={authType === "bearer" ? "default" : "outline"}
+                  onClick={() => setAuthType("bearer")}
+                  disabled={transport === "stdio"}
+                >
+                  Bearer Token
+                </Button>
+                <Button
+                  size="sm"
+                  variant={authType === "oauth" ? "default" : "outline"}
+                  onClick={() => setAuthType("oauth")}
+                  disabled={transport === "stdio"}
+                >
+                  OAuth
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground mt-1">
+                {authType === "oauth" && "Connects via OAuth consent screen. You'll authorize via browser on first connect."}
+                {authType === "bearer" && "Uses a static API token from the Secrets store."}
+                {authType === "none" && "No authentication."}
+              </p>
             </div>
+            {authType === "bearer" && (
+              <div>
+                <label className="text-sm font-medium">Auth Token Secret Name</label>
+                <Input
+                  value={authTokenSecret}
+                  onChange={(e) => setAuthTokenSecret(e.target.value)}
+                  placeholder="e.g. FASTMAIL_API_TOKEN"
+                />
+                <p className="text-xs text-muted-foreground mt-1">Resolved from the Secrets store at connection time.</p>
+              </div>
+            )}
             {transport === "stdio" && (
               <div>
                 <label className="text-sm font-medium">Env Secret Names (comma-separated, optional)</label>

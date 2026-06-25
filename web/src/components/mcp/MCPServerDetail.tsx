@@ -107,6 +107,16 @@ export function MCPServerDetail() {
     }
   };
 
+  const handleDeauthorize = async () => {
+    if (!name || !confirm("Clear OAuth tokens? You'll need to re-authorize via the consent screen.")) return;
+    try {
+      await api.deauthorizeMCPOAuth(name);
+      await refresh();
+    } catch (e) {
+      console.error("Failed to deauthorize:", e);
+    }
+  };
+
   if (loading) return <div className="p-6 text-muted-foreground">Loading…</div>;
   if (!server) return <div className="p-6 text-muted-foreground">MCP server not found.</div>;
 
@@ -180,6 +190,28 @@ export function MCPServerDetail() {
                   <Badge className="bg-green-600 text-white">set</Badge>
                 ) : (
                   <Badge variant="secondary" className="bg-yellow-600 text-white">missing</Badge>
+                )}
+              </div>
+            )}
+            {server.auth_type === "oauth" && (
+              <div className="flex items-center gap-2 text-sm">
+                <span className="text-muted-foreground">OAuth:</span>
+                {server.oauth_status === "authorized" ? (
+                  <>
+                    <Badge className="bg-green-600 text-white">authorized</Badge>
+                    <Button size="sm" variant="outline" onClick={handleDeauthorize}>
+                      Deauthorize
+                    </Button>
+                  </>
+                ) : server.oauth_status === "not_authorized" ? (
+                  <>
+                    <Badge variant="secondary" className="bg-yellow-600 text-white">not authorized</Badge>
+                    <span className="text-xs text-muted-foreground">
+                      Click "Connect" to start the OAuth consent flow.
+                    </span>
+                  </>
+                ) : (
+                  <Badge variant="outline">{server.oauth_status}</Badge>
                 )}
               </div>
             )}

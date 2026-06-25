@@ -817,3 +817,277 @@ def test_schema_top_level_boolean():
     params, param_map = MCPManager._schema_to_parameters(True)  # type: ignore
     assert params == []
     assert param_map == {}
+
+
+# ---------------------------------------------------------------------------
+# OAuth tests
+# ---------------------------------------------------------------------------
+
+
+def test_mcp_server_config_with_oauth_auth_type():
+    """MCPServerConfig serializes auth_type correctly."""
+    cfg = MCPServerConfig(
+        name="fastmail",
+        transport="sse",
+        url="https://api.fastmail.com/mcp",
+        auth_type="oauth",
+    )
+    d = cfg.to_dict()
+    assert d["auth_type"] == "oauth"
+
+    cfg2 = MCPServerConfig.from_dict(d)
+    assert cfg2.auth_type == "oauth"
+
+
+def test_mcp_server_config_default_auth_type_is_none():
+    """auth_type defaults to 'none' when not specified."""
+    cfg = MCPServerConfig(name="test", transport="sse", url="https://example.com")
+    assert cfg.auth_type == "none"
+
+
+def test_mcp_server_config_backward_compat_bearer():
+    """Old configs without auth_type still deserialize correctly."""
+    old_data = {
+        "name": "legacy",
+        "transport": "sse",
+        "url": "https://example.com",
+        "auth_token_secret": "MY_TOKEN",
+        # no auth_type field
+    }
+    cfg = MCPServerConfig.from_dict(old_data)
+    assert cfg.auth_type == "none"  # defaults to none
+    assert cfg.auth_token_secret == "MY_TOKEN"
+
+
+@pytest.mark.asyncio
+async def test_create_server_bearer_backward_compat(tmp_path):
+    """Server with auth_token_secret but no auth_type gets upgraded to bearer."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(
+        name="legacy",
+        transport="sse",
+        url="https://example.com",
+        auth_token_secret="MY_TOKEN",
+        # auth_type defaults to "none"
+    )
+    result = await manager.create_server(config)
+    assert "created" in result
+
+    stored = manager.get_server("legacy")
+    assert stored.auth_type == "bearer"  # upgraded
+
+
+@pytest.mark.asyncio
+async def test_create_server_oauth_requires_sse(tmp_path):
+    """OAuth auth_type requires SSE transport."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(
+        name="bad",
+        transport="stdio",
+        command="echo",
+        auth_type="oauth",
+    )
+    result = await manager.create_server(config)
+    assert "requires SSE" in result
+
+
+@pytest.mark.asyncio
+async def test_oauth_status_not_configured(tmp_path):
+    """get_oauth_status returns 'not_configured' for non-OAuth servers."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(name="test", transport="sse", url="https://example.com")
+    await manager.create_server(config)
+
+    status = await manager.get_oauth_status_async("test")
+    assert status == "not_configured"
+
+
+@pytest.mark.asyncio
+async def test_oauth_status_not_authorized(tmp_path):
+    """get_oauth_status returns 'not_authorized' for OAuth servers without tokens."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(
+        name="fastmail",
+        transport="sse",
+        url="https://api.fastmail.com/mcp",
+        auth_type="oauth",
+    )
+    await manager.create_server(config)
+
+    status = await manager.get_oauth_status_async("fastmail")
+    assert status == "not_authorized"
+
+
+@pytest.mark.asyncio
+async def test_oauth_status_authorized(tmp_path):
+    """get_oauth_status returns 'authorized' when tokens are stored."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(
+        name="fastmail",
+        transport="sse",
+        url="https://api.fastmail.com/mcp",
+        auth_type="oauth",
+    )
+    await manager.create_server(config)
+
+    # Simulate stored OAuth token
+    from src.store.store import Store as StoreType
+    assert isinstance(store, StoreType)
+    await store.documents.create(
+        "mcptoken:fastmail",
+        json.dumps({"access_token": "tok", "token_type": "Bearer"}),
+    )
+
+    status = await manager.get_oauth_status_async("fastmail")
+    assert status == "authorized"
+
+
+@pytest.mark.asyncio
+async def test_clear_oauth_tokens(tmp_path):
+    """clear_oauth_tokens removes stored tokens."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(
+        name="fastmail",
+        transport="sse",
+        url="https://api.fastmail.com/mcp",
+        auth_type="oauth",
+    )
+    await manager.create_server(config)
+
+    # Store a token
+    await store.documents.create(
+        "mcptoken:fastmail",
+        json.dumps({"access_token": "tok", "token_type": "Bearer"}),
+    )
+    assert await manager.get_oauth_status_async("fastmail") == "authorized"
+
+    # Clear it
+    result = await manager.clear_oauth_tokens("fastmail")
+    assert "cleared" in result
+    assert await manager.get_oauth_status_async("fastmail") == "not_authorized"
+
+
+@pytest.mark.asyncio
+async def test_connect_all_skips_unauthorized_oauth(tmp_path):
+    """connect_all skips OAuth servers that haven't been authorized."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(
+        name="fastmail",
+        transport="sse",
+        url="https://api.fastmail.com/mcp",
+        auth_type="oauth",
+        enabled=True,
+    )
+    await manager.create_server(config)
+
+    # Should skip silently, not try to connect
+    await manager.connect_all()
+    assert not manager.is_connected("fastmail")
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_oauth_token_storage_roundtrip(tmp_path):
+    """MCPOAuthTokenStorage stores and retrieves tokens."""
+    from src.tools.mcp import MCPOAuthTokenStorage
+
+    manager, store = await _make_manager(tmp_path)
+    storage = MCPOAuthTokenStorage(store, "testserver")
+
+    # No tokens initially
+    tokens = await storage.get_tokens()
+    assert tokens is None
+
+    # Store tokens
+    from mcp.shared.auth import OAuthToken
+
+    token = OAuthToken(
+        access_token="abc123",
+        token_type="Bearer",
+        refresh_token="refresh456",
+        expires_in=3600,
+    )
+    await storage.set_tokens(token)
+
+    # Retrieve
+    retrieved = await storage.get_tokens()
+    assert retrieved is not None
+    assert retrieved.access_token == "abc123"
+    assert retrieved.refresh_token == "refresh456"
+    assert retrieved.expires_in == 3600
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_web_create_oauth_server(tmp_path):
+    """POST /api/mcp/servers creates an OAuth server."""
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from src.web.dependencies import get_executor
+    from src.web.routers import mcp as mcp_router
+
+    manager, store = await _make_manager(tmp_path)
+
+    executor = MagicMock()
+    executor.mcp_manager = manager
+
+    app = FastAPI()
+    app.state.executor = executor
+    app.dependency_overrides[get_executor] = lambda: executor
+    app.include_router(mcp_router.router, prefix="/api")
+
+    client = TestClient(app)
+    resp = client.post("/api/mcp/servers", json={
+        "name": "fastmail",
+        "transport": "sse",
+        "url": "https://api.fastmail.com/mcp",
+        "auth_type": "oauth",
+    })
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["name"] == "fastmail"
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_web_oauth_deauthorize(tmp_path):
+    """POST /api/mcp/servers/{name}/oauth/deauthorize clears tokens."""
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from src.web.dependencies import get_executor
+    from src.web.routers import mcp as mcp_router
+
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(
+        name="fastmail",
+        transport="sse",
+        url="https://api.fastmail.com/mcp",
+        auth_type="oauth",
+    )
+    await manager.create_server(config)
+
+    # Store a token
+    await store.documents.create(
+        "mcptoken:fastmail",
+        json.dumps({"access_token": "tok", "token_type": "Bearer"}),
+    )
+
+    executor = MagicMock()
+    executor.mcp_manager = manager
+
+    app = FastAPI()
+    app.state.executor = executor
+    app.dependency_overrides[get_executor] = lambda: executor
+    app.include_router(mcp_router.router, prefix="/api")
+
+    client = TestClient(app)
+    resp = client.post("/api/mcp/servers/fastmail/oauth/deauthorize")
+    assert resp.status_code == 200
+    assert "cleared" in resp.json()["message"].lower()
+
+    # Token should be gone
+    status = await manager.get_oauth_status_async("fastmail")
+    assert status == "not_authorized"
+    await store.close()
