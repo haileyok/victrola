@@ -257,4 +257,17 @@ export const api = {
       `${API_BASE}/mcp/servers/${enc(name)}/oauth/deauthorize`,
       { method: "POST" },
     ),
+  getOAuthConsentUrl: (name: string) =>
+    fetchJSON<{ consent_url: string | null; pending_callback: boolean }>(
+      `${API_BASE}/mcp/servers/${enc(name)}/oauth/consent-url`,
+    ),
+  submitOAuthCallback: (name: string, redirectUrl: string) =>
+    fetchJSON<{ message: string }>(
+      `${API_BASE}/mcp/servers/${enc(name)}/oauth/callback`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ redirect_url: redirectUrl }),
+      },
+    ),
 };

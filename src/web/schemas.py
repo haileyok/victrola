@@ -166,3 +166,7 @@ class MCPServerDetail(BaseModel):
 
 class ToolActionRequest(BaseModel):
     tool_name: str
+
+
+class OAuthCallbackRequest(BaseModel):
+    redirect_url: str

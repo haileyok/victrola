@@ -22,6 +22,9 @@ export function MCPServerDetail() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [oauthConsentUrl, setOauthConsentUrl] = useState<string | null>(null);
+  const [oauthPending, setOauthPending] = useState(false);
+  const [callbackUrl, setCallbackUrl] = useState("");
 
   const refresh = useCallback(async () => {
     if (!name) return;
@@ -42,8 +45,31 @@ export function MCPServerDetail() {
     if (!name) return;
     setBusy(true);
     setError("");
+    setOauthConsentUrl(null);
+    setOauthPending(false);
     try {
-      setServer(await api.connectMCPServer(name));
+      // For OAuth servers, the connect may fail with 500 because it's waiting
+      // for the callback. We catch that and check for a pending consent URL.
+      try {
+        setServer(await api.connectMCPServer(name));
+      } catch (e) {
+        // Check if there's a pending OAuth flow
+        if (server?.auth_type === "oauth") {
+          try {
+            const oauthInfo = await api.getOAuthConsentUrl(name);
+            if (oauthInfo.consent_url) {
+              setOauthConsentUrl(oauthInfo.consent_url);
+              setOauthPending(oauthInfo.pending_callback);
+              // Poll for completion
+              pollOAuthStatus();
+              return;
+            }
+          } catch {
+            // ignore
+          }
+        }
+        throw e;
+      }
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Failed to connect");
     } finally {
@@ -107,6 +133,44 @@ export function MCPServerDetail() {
     }
   };
 
+  const pollOAuthStatus = async () => {
+    if (!name) return;
+    for (let i = 0; i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      try {
+        const oauthInfo = await api.getOAuthConsentUrl(name);
+        if (!oauthInfo.pending_callback && !oauthInfo.consent_url) {
+          // Flow completed — refresh server state
+          setOauthConsentUrl(null);
+          setOauthPending(false);
+          await refresh();
+          return;
+        }
+      } catch {
+        // ignore poll errors
+      }
+    }
+    // Timeout
+    setOauthPending(false);
+    setError("OAuth flow timed out waiting for callback");
+  };
+
+  const handleSubmitCallback = async () => {
+    if (!name || !callbackUrl) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api.submitOAuthCallback(name, callbackUrl);
+      setCallbackUrl("");
+      // The connect should complete now — poll for the result
+      pollOAuthStatus();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Failed to submit callback");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleDeauthorize = async () => {
     if (!name || !confirm("Clear OAuth tokens? You'll need to re-authorize via the consent screen.")) return;
     try {
@@ -155,6 +219,38 @@ export function MCPServerDetail() {
       {error && (
         <div className="px-6 py-2 text-sm text-red-500 bg-red-50 dark:bg-red-950/20">
           {error}
+        </div>
+      )}
+
+      {oauthConsentUrl && (
+        <div className="px-6 py-4 border-b border-border bg-blue-50 dark:bg-blue-950/20">
+          <div className="text-sm font-medium mb-2">OAuth Authorization Required</div>
+          <p className="text-xs text-muted-foreground mb-3">
+            Click the link below to authorize with Fastmail. After authorizing, you'll be redirected to a page that won't load — that's expected. Copy the full URL from your browser's address bar and paste it below.
+          </p>
+          <a
+            href={oauthConsentUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 text-sm text-blue-600 dark:text-blue-400 underline"
+          >
+            Open consent screen →
+          </a>
+          <div className="mt-3 flex gap-2">
+            <input
+              type="text"
+              value={callbackUrl}
+              onChange={(e) => setCallbackUrl(e.target.value)}
+              placeholder="Paste the redirect URL here (http://localhost:8989/callback?code=...)"
+              className="flex-1 rounded-md border border-border bg-background px-3 py-1.5 text-sm"
+            />
+            <Button size="sm" onClick={handleSubmitCallback} disabled={busy || !callbackUrl}>
+              Submit
+            </Button>
+          </div>
+          {oauthPending && (
+            <p className="text-xs text-muted-foreground mt-2">Waiting for callback…</p>
+          )}
         </div>
       )}
 

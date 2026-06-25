@@ -14,6 +14,7 @@ from src.web.schemas import (
     MCPServerDetail,
     MCPServerSummary,
     MCPToolSummary,
+    OAuthCallbackRequest,
     ToolActionRequest,
 )
 
@@ -245,4 +246,40 @@ async def oauth_deauthorize(
     if config.auth_type != "oauth":
         raise HTTPException(400, f"MCP server '{name}' does not use OAuth")
     result = await mgr.clear_oauth_tokens(name)
+    return {"message": result}
+
+
+@router.get("/servers/{name}/oauth/consent-url")
+async def oauth_consent_url(
+    name: str,
+    executor: ToolExecutor = Depends(get_executor),
+) -> dict[str, Any]:
+    """Get the OAuth consent URL for a server (if a connect is in progress)."""
+    mgr = _get_manager(executor)
+    config = mgr.get_server(name)
+    if config is None:
+        raise HTTPException(404, f"MCP server '{name}' not found")
+    if config.auth_type != "oauth":
+        raise HTTPException(400, f"MCP server '{name}' does not use OAuth")
+    url = mgr.get_oauth_consent_url(name)
+    has_pending = hasattr(mgr, "_oauth_state") and name in getattr(mgr, "_oauth_state", {}) and mgr._oauth_state[name].get("pending_callback") is not None
+    return {"consent_url": url, "pending_callback": has_pending}
+
+
+@router.post("/servers/{name}/oauth/callback")
+async def oauth_callback(
+    name: str,
+    body: OAuthCallbackRequest,
+    executor: ToolExecutor = Depends(get_executor),
+) -> dict[str, Any]:
+    """Submit the OAuth redirect URL pasted by the operator."""
+    mgr = _get_manager(executor)
+    config = mgr.get_server(name)
+    if config is None:
+        raise HTTPException(404, f"MCP server '{name}' not found")
+    if config.auth_type != "oauth":
+        raise HTTPException(400, f"MCP server '{name}' does not use OAuth")
+    result = await mgr.submit_oauth_callback(name, body.redirect_url)
+    if "No pending" in result:
+        raise HTTPException(400, result)
     return {"message": result}

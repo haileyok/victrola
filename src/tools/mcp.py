@@ -806,79 +806,73 @@ class MCPManager:
     def _create_oauth_provider(self, server_name: str, server_url: str) -> Any:
         """Create an OAuthClientProvider for a server.
 
-        The redirect_handler stores the consent URL so the web UI can surface it.
-        The callback_handler runs a local HTTP server to catch the OAuth redirect.
+        Uses a paste-back flow instead of a local callback server so it works
+        even when Victrola runs on a remote server. The redirect_handler stores
+        the consent URL for the web UI. The callback_handler waits for the
+        operator to paste the full redirect URL back via the web API.
         """
         from mcp.client.auth import OAuthClientProvider
         from mcp.shared.auth import OAuthClientMetadata
 
         storage = MCPOAuthTokenStorage(self._store, server_name)
 
+        # Use a simple redirect URI — the page will show the code to paste
         client_metadata = OAuthClientMetadata(
             client_name="Victrola",
             redirect_uris=[AnyUrl("http://localhost:8989/callback")],  # type: ignore
             grant_types=["authorization_code", "refresh_token"],
             response_types=["code"],
             token_endpoint_auth_method="none",
-            scope=None,  # let the server tell us what scopes are available
+            scope=None,
         )
 
-        # Store the consent URL so the web UI can retrieve it
-        self._oauth_redirect_urls: dict[str, str] = getattr(self, "_oauth_redirect_urls", {})
+        # Per-server state for the paste-back flow
+        if not hasattr(self, "_oauth_state"):
+            self._oauth_state: dict[str, dict[str, Any]] = {}
+        self._oauth_state[server_name] = {
+            "consent_url": None,
+            "pending_callback": None,
+        }
 
         async def redirect_handler(url: str) -> None:
-            self._oauth_redirect_urls[server_name] = url
+            self._oauth_state[server_name]["consent_url"] = url
             logger.info("OAuth consent URL for '%s': %s", server_name, url)
 
         async def callback_handler() -> tuple[str, str | None]:
-            """Run a local HTTP server to catch the OAuth callback redirect."""
-            import http.server
-            import threading
+            """Wait for the operator to paste the redirect URL via the web API."""
+            # Create a future that will be resolved when the operator
+            # submits the redirect URL via the /oauth/callback endpoint
+            loop = asyncio.get_event_loop()
+            future = loop.create_future()
+            self._oauth_state[server_name]["pending_callback"] = future
+
+            logger.info("Waiting for OAuth callback paste for '%s'...", server_name)
+
+            try:
+                # Wait up to 5 minutes for the operator to complete the flow
+                callback_url = await asyncio.wait_for(future, timeout=300.0)
+            except asyncio.TimeoutError:
+                self._oauth_state[server_name]["pending_callback"] = None
+                raise RuntimeError("OAuth callback timed out — no response within 5 minutes")
+
+            self._oauth_state[server_name]["pending_callback"] = None
+
+            # Parse the callback URL to extract code and state
             import urllib.parse
 
-            result: dict[str, Any] = {}
+            parsed = urllib.parse.urlparse(callback_url)
+            params = urllib.parse.parse_qs(parsed.query)
 
-            class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
-                def do_GET(self):
-                    parsed = urllib.parse.urlparse(self.path)
-                    params = urllib.parse.parse_qs(parsed.query)
-                    result["code"] = params.get("code", [None])[0]
-                    result["state"] = params.get("state", [None])[0]
-                    result["error"] = params.get("error", [None])[0]
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/html")
-                    self.end_headers()
-                    if result.get("error"):
-                        self.wfile.write(b"<h1>Authorization failed</h1>")
-                    else:
-                        self.wfile.write(b"<h1>Authorization successful</h1><p>You can close this tab.</p>")
+            if "error" in params:
+                raise RuntimeError(f"OAuth authorization error: {params['error'][0]}")
 
-                def log_message(self, *args):
-                    pass  # suppress default logging
+            code = params.get("code", [None])[0]
+            state = params.get("state", [None])[0]
 
-            import socket
+            if not code:
+                raise RuntimeError("OAuth callback URL did not contain an authorization code")
 
-            class ReusableHTTPServer(http.server.HTTPServer):
-                allow_reuse_address = True
-
-            server = ReusableHTTPServer(("127.0.0.1", 8989), OAuthCallbackHandler)
-            server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            server.timeout = 300  # 5 min timeout
-
-            # Run in a thread so we can await
-            def serve():
-                server.handle_request()
-
-            thread = threading.Thread(target=serve, daemon=True)
-            thread.start()
-            thread.join(timeout=305)
-
-            if result.get("error"):
-                raise RuntimeError(f"OAuth authorization error: {result['error']}")
-            if not result.get("code"):
-                raise RuntimeError("OAuth callback did not receive authorization code")
-
-            return result["code"], result.get("state")
+            return code, state
 
         provider = OAuthClientProvider(
             server_url=server_url,
@@ -891,8 +885,22 @@ class MCPManager:
 
     def get_oauth_consent_url(self, name: str) -> str | None:
         """Return the OAuth consent URL if one was generated during connect."""
-        urls = getattr(self, "_oauth_redirect_urls", {})
-        return urls.get(name)
+        state = getattr(self, "_oauth_state", {}).get(name, {})
+        return state.get("consent_url")
+
+    async def submit_oauth_callback(self, name: str, redirect_url: str) -> str:
+        """Submit the OAuth redirect URL pasted by the operator.
+
+        This resolves the pending callback handler and allows the OAuth flow
+        to continue.
+        """
+        state = getattr(self, "_oauth_state", {}).get(name, {})
+        future = state.get("pending_callback")
+        if future is None or future.done():
+            return f"No pending OAuth callback for '{name}'. Start a connection first."
+
+        future.set_result(redirect_url)
+        return f"OAuth callback submitted for '{name}'."
 
     def _register_tool(self, server_name: str, mcp_tool: MCPTool) -> None:
         """Register an MCP tool in the TOOL_REGISTRY."""
