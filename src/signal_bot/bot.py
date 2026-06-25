@@ -88,7 +88,8 @@ class SignalBot:
     async def _start_typing(self) -> None:
         """Send a typing indicator to the operator."""
         try:
-            await self._http_client.post(
+            await self._http_client.request(
+                "PUT",
                 self._typing_url(),
                 json={"recipient": self._operator_phone},
                 timeout=5.0,
@@ -99,7 +100,8 @@ class SignalBot:
     async def _stop_typing(self) -> None:
         """Clear the typing indicator."""
         try:
-            await self._http_client.delete(
+            await self._http_client.request(
+                "DELETE",
                 self._typing_url(),
                 json={"recipient": self._operator_phone},
                 timeout=5.0,
