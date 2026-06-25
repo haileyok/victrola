@@ -106,7 +106,7 @@ def test_schema_to_parameters_simple_types():
         },
         "required": ["query", "limit"],
     }
-    params = MCPManager._schema_to_parameters(schema)
+    params, param_map = MCPManager._schema_to_parameters(schema)
     assert len(params) == 6
 
     by_name = {p.name: p for p in params}
@@ -119,12 +119,18 @@ def test_schema_to_parameters_simple_types():
     assert by_name["verbose"].type == "boolean"
     assert by_name["filter"].type == "object"
     assert by_name["tags"].type == "array"
+    # param_map should map sanitized -> original (all same here since no special chars)
+    assert param_map["query"] == "query"
 
 
 def test_schema_to_parameters_empty():
-    """_schema_to_parameters returns [] for empty schema."""
-    assert MCPManager._schema_to_parameters({}) == []
-    assert MCPManager._schema_to_parameters({"type": "object"}) == []
+    """_schema_to_parameters returns ([], {}) for empty schema."""
+    params, param_map = MCPManager._schema_to_parameters({})
+    assert params == []
+    assert param_map == {}
+    params, param_map = MCPManager._schema_to_parameters({"type": "object"})
+    assert params == []
+    assert param_map == {}
 
 
 def test_schema_to_parameters_unknown_type_defaults_string():
@@ -135,8 +141,27 @@ def test_schema_to_parameters_unknown_type_defaults_string():
             "custom": {"type": "weird-type", "description": "Unknown"},
         },
     }
-    params = MCPManager._schema_to_parameters(schema)
+    params, _ = MCPManager._schema_to_parameters(schema)
     assert params[0].type == "string"
+
+
+def test_schema_to_parameters_sanitizes_non_identifier_names():
+    """Property names with non-identifier chars are sanitized, with a mapping back to original."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "foo-bar": {"type": "string", "description": "Hyphenated"},
+            "x.y": {"type": "string", "description": "Dotted"},
+        },
+    }
+    params, param_map = MCPManager._schema_to_parameters(schema)
+    assert len(params) == 2
+    names = {p.name for p in params}
+    assert "foo_bar" in names
+    assert "x_y" in names
+    # mapping preserves original names for the MCP server call
+    assert param_map["foo_bar"] == "foo-bar"
+    assert param_map["x_y"] == "x.y"
 
 
 # ---------------------------------------------------------------------------
@@ -145,11 +170,13 @@ def test_schema_to_parameters_unknown_type_defaults_string():
 
 
 def test_sanitize_tool_name():
-    """_sanitize_tool_name replaces non-identifier chars with underscore."""
+    """_sanitize_tool_name replaces non-identifier chars with underscore, ensures valid start."""
     assert MCPManager._sanitize_tool_name("search_mail") == "search_mail"
     assert MCPManager._sanitize_tool_name("search.mail") == "search_mail"
     assert MCPManager._sanitize_tool_name("foo-bar") == "foo_bar"
     assert MCPManager._sanitize_tool_name("foo bar") == "foo_bar"
+    # leading digit gets underscore prefix
+    assert MCPManager._sanitize_tool_name("123abc") == "_123abc"
 
 
 # ---------------------------------------------------------------------------
@@ -191,11 +218,16 @@ async def test_create_server_rejects_reserved_name(tmp_path):
 
 @pytest.mark.asyncio
 async def test_create_server_rejects_invalid_name(tmp_path):
-    """create_server rejects names with invalid characters."""
+    """create_server rejects names that are invalid TS identifiers."""
     manager, store = await _make_manager(tmp_path)
-    config = MCPServerConfig(name="bad.name", transport="sse", url="https://example.com")
+    # hyphens are not valid TS identifier characters
+    config = MCPServerConfig(name="bad-name", transport="sse", url="https://example.com")
     result = await manager.create_server(config)
     assert "invalid" in result.lower()
+    # leading digits are not valid
+    config2 = MCPServerConfig(name="123abc", transport="sse", url="https://example.com")
+    result2 = await manager.create_server(config2)
+    assert "invalid" in result2.lower()
     await store.close()
 
 
@@ -492,4 +524,81 @@ async def test_web_approve_tool(tmp_path):
 
     # verify tool was registered
     assert manager._registry.get("webtest.tool1") is not None
+    await store.close()
+
+
+# ---------------------------------------------------------------------------
+# Security: TS injection prevention
+# ---------------------------------------------------------------------------
+
+
+def test_ts_injection_prevention_in_description():
+    """Tool descriptions with */ must not break TS comment generation."""
+    from src.tools.registry import TOOL_REGISTRY, Tool
+
+    async def handler(ctx, **kw):
+        pass
+
+    # register a tool with a malicious description
+    malicious_desc = '*/ }; evil(); export const x = { /*'
+    TOOL_REGISTRY.register(
+        Tool(
+            name="inj.test",
+            description=malicious_desc,
+            parameters=[],
+            handler=handler,
+        )
+    )
+
+    ts = TOOL_REGISTRY.generate_typescript_types()
+    # The */ must have been neutralized — no raw */ in the output
+    assert "*/ };" not in ts
+    # clean up
+    TOOL_REGISTRY.unregister("inj.test")
+
+
+def test_ts_injection_prevention_in_tool_name():
+    """Tool names with quotes must not break the callTool string literal."""
+    from src.tools.registry import TOOL_REGISTRY, Tool
+
+    async def handler(ctx, **kw):
+        pass
+
+    TOOL_REGISTRY.register(
+        Tool(
+            name='weird";name',
+            description="test",
+            parameters=[],
+            handler=handler,
+        )
+    )
+
+    ts = TOOL_REGISTRY.generate_typescript_types()
+    # The quote must have been escaped — no raw unescaped " inside the callTool string
+    assert 'callTool("weird\\";name"' in ts
+    TOOL_REGISTRY.unregister('weird";name')
+
+
+@pytest.mark.asyncio
+async def test_connect_failure_cleans_up_exit_stack(tmp_path):
+    """If MCPConnection.connect() fails, the exit stack must be closed (no leak)."""
+    from pathlib import Path
+    from src.store.store import Store
+
+    store = Store(path=tmp_path / "store.db")
+    await store.initialize()
+    registry = ToolRegistry()
+    manager = MCPManager(store=store, secret_manager=None, registry=registry)
+
+    config = MCPServerConfig(name="failtest", transport="sse", url="https://invalid.example.invalid/mcp")
+    await manager.create_server(config)
+
+    # Attempt to connect — should fail and clean up
+    try:
+        await manager.connect_server("failtest")
+    except Exception:
+        pass  # expected to fail
+
+    # Connection should not be stored
+    assert "failtest" not in manager._connections
     await store.close()

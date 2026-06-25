@@ -37,14 +37,17 @@ _RESERVED_NAMESPACES = {
     "custom_tools",
 }
 
-# Valid server name: alphanumeric + dash + underscore (no dots — dots are namespace separators)
-_SERVER_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# Valid server name: must be a valid TypeScript identifier (letter/underscore start, alphanumeric/underscore body)
+_SERVER_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
 # Sanitize discovered tool names to valid TS identifiers
 _SANITIZE_PATTERN = re.compile(r"[^A-Za-z0-9_]")
 
 # Bounded timeout for connecting to an MCP server
 _CONNECT_TIMEOUT = 30.0
+
+# Bounded timeout for individual tool calls and list_tools
+_CALL_TIMEOUT = 60.0
 
 
 @dataclass
@@ -140,51 +143,57 @@ class MCPConnection:
         """Establish connection to the MCP server."""
         self._stack = contextlib.AsyncExitStack()
 
-        # resolve auth token if configured
-        headers: dict[str, str] = {}
-        if self._config.auth_token_secret and self._secret_manager:
-            token = self._secret_manager.get_secret(self._config.auth_token_secret)
-            if token:
-                headers["Authorization"] = f"Bearer {token}"
+        try:
+            # resolve auth token if configured
+            headers: dict[str, str] = {}
+            if self._config.auth_token_secret and self._secret_manager:
+                token = self._secret_manager.get_secret(self._config.auth_token_secret)
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
 
-        if self._config.transport == "sse":
-            if not self._config.url:
-                raise ValueError(f"SSE transport requires URL for server '{self._config.name}'")
-            from mcp.client.sse import sse_client
+            if self._config.transport == "sse":
+                if not self._config.url:
+                    raise ValueError(f"SSE transport requires URL for server '{self._config.name}'")
+                from mcp.client.sse import sse_client
 
-            read, write = await self._stack.enter_async_context(
-                sse_client(self._config.url, headers=headers or None)
-            )
-        elif self._config.transport == "stdio":
-            if not self._config.command:
-                raise ValueError(
-                    f"stdio transport requires command for server '{self._config.name}'"
+                read, write = await self._stack.enter_async_context(
+                    sse_client(self._config.url, headers=headers or None)
                 )
-            from mcp.client.stdio import StdioServerParameters, stdio_client
+            elif self._config.transport == "stdio":
+                if not self._config.command:
+                    raise ValueError(
+                        f"stdio transport requires command for server '{self._config.name}'"
+                    )
+                from mcp.client.stdio import StdioServerParameters, stdio_client
 
-            env: dict[str, str] = {}
-            if self._secret_manager:
-                for secret_name in self._config.env_secrets:
-                    val = self._secret_manager.get_secret(secret_name)
-                    if val:
-                        env[secret_name.upper()] = val
+                env: dict[str, str] = {}
+                if self._secret_manager:
+                    for secret_name in self._config.env_secrets:
+                        val = self._secret_manager.get_secret(secret_name)
+                        if val:
+                            env[secret_name.upper()] = val
 
-            params = StdioServerParameters(
-                command=self._config.command,
-                args=self._config.args,
-                env=env or None,
+                params = StdioServerParameters(
+                    command=self._config.command,
+                    args=self._config.args,
+                    env=env or None,
+                )
+                read, write = await self._stack.enter_async_context(stdio_client(params))
+            else:
+                raise ValueError(f"Unknown transport: {self._config.transport}")
+
+            from mcp.client.session import ClientSession
+
+            self._session = await self._stack.enter_async_context(
+                ClientSession(read, write)
             )
-            read, write = await self._stack.enter_async_context(stdio_client(params))
-        else:
-            raise ValueError(f"Unknown transport: {self._config.transport}")
-
-        from mcp.client.session import ClientSession
-
-        self._session = await self._stack.enter_async_context(
-            ClientSession(read, write)
-        )
-        await asyncio.wait_for(self._session.initialize(), timeout=_CONNECT_TIMEOUT)
-        logger.info("Connected to MCP server '%s'", self._config.name)
+            await asyncio.wait_for(self._session.initialize(), timeout=_CONNECT_TIMEOUT)
+            logger.info("Connected to MCP server '%s'", self._config.name)
+        except BaseException:
+            # Clean up the exit stack if any step failed — otherwise
+            # transports/subprocesses entered into the stack would leak.
+            await self.disconnect()
+            raise
 
     async def disconnect(self) -> None:
         """Close the connection."""
@@ -200,7 +209,9 @@ class MCPConnection:
         """List tools from the MCP server."""
         if self._session is None:
             raise RuntimeError("Not connected")
-        result = await self._session.list_tools()
+        result = await asyncio.wait_for(
+            self._session.list_tools(), timeout=_CALL_TIMEOUT
+        )
         return result.tools
 
     async def call_tool(self, name: str, params: dict[str, Any]) -> Any:
@@ -208,7 +219,9 @@ class MCPConnection:
         if self._session is None:
             raise RuntimeError("Not connected")
 
-        result = await self._session.call_tool(name, params)
+        result = await asyncio.wait_for(
+            self._session.call_tool(name, params), timeout=_CALL_TIMEOUT
+        )
 
         # convert CallToolResult to a plain Python value
         if result.isError:
@@ -360,12 +373,24 @@ class MCPManager:
         # build a lookup of existing tools by original name to preserve approval
         existing = {t.name: t for t in config.tools}
         new_tools: list[MCPTool] = []
+        seen_sanitized: dict[str, str] = {}  # sanitized_name -> original_name
 
         for st in server_tools:
             # MCP SDK Tool has: name, description, inputSchema
             tool_name = st.name
             description = st.description or ""
             input_schema = st.inputSchema if st.inputSchema else {}
+
+            # check for sanitized name collisions
+            sanitized = self._sanitize_tool_name(tool_name)
+            if sanitized in seen_sanitized:
+                logger.warning(
+                    "MCP server '%s': tool '%s' collides with '%s' after sanitization "
+                    "(both map to '%s') — skipping duplicate",
+                    name, tool_name, seen_sanitized[sanitized], sanitized,
+                )
+                continue
+            seen_sanitized[sanitized] = tool_name
 
             if tool_name in existing:
                 # preserve approval state
@@ -376,8 +401,13 @@ class MCPManager:
                     input_schema=input_schema,
                     approved=old.approved,
                 )
-                # if schema changed and tool is approved, re-register
-                if old.approved and old.input_schema != input_schema:
+                # re-register if approved and anything registry-facing changed
+                if old.approved and (
+                    old.input_schema != input_schema
+                    or old.description != description
+                ):
+                    # unregister old first to avoid stale handler
+                    self._registry.unregister(f"{name}.{sanitized}")
                     self._register_tool(name, new_tool)
             else:
                 new_tool = MCPTool(
@@ -477,7 +507,7 @@ class MCPManager:
         if not _SERVER_NAME_PATTERN.match(config.name):
             return (
                 f"Error: server name '{config.name}' is invalid. "
-                "Allowed: alphanumeric, dash, underscore (1-64 chars)"
+                "Allowed: letter or underscore start, then letters, digits, or underscore (1-64 chars)"
             )
         if config.name in _RESERVED_NAMESPACES:
             return f"Error: server name '{config.name}' is a reserved namespace."
@@ -575,11 +605,14 @@ class MCPManager:
         """Register an MCP tool in the TOOL_REGISTRY."""
         sanitized = self._sanitize_tool_name(mcp_tool.name)
         full_name = f"{server_name}.{sanitized}"
-        params = self._schema_to_parameters(mcp_tool.input_schema)
+        params, param_map = self._schema_to_parameters(mcp_tool.input_schema)
         manager = self
+        original_tool_name = mcp_tool.name
 
         async def handler(ctx: Any, **kwargs: Any) -> Any:
-            return await manager.call_tool(server_name, mcp_tool.name, kwargs)
+            # Map sanitized param names back to the original schema keys
+            original_params = {param_map.get(k, k): v for k, v in kwargs.items()}
+            return await manager.call_tool(server_name, original_tool_name, original_params)
 
         self._registry.register(
             Tool(
@@ -592,12 +625,18 @@ class MCPManager:
 
     @staticmethod
     def _sanitize_tool_name(name: str) -> str:
-        """Replace non-identifier characters with underscore."""
-        return _SANITIZE_PATTERN.sub("_", name)
+        """Replace non-identifier characters with underscore, ensure valid start."""
+        sanitized = _SANITIZE_PATTERN.sub("_", name)
+        if sanitized and not sanitized[0].isalpha() and sanitized[0] != "_":
+            sanitized = "_" + sanitized
+        return sanitized
 
     @staticmethod
-    def _schema_to_parameters(schema: dict[str, Any]) -> list[ToolParameter]:
-        """Convert a JSON Schema to ToolParameter list."""
+    def _schema_to_parameters(schema: dict[str, Any]) -> tuple[list[ToolParameter], dict[str, str]]:
+        """Convert a JSON Schema to ToolParameter list + param name mapping.
+
+        Returns (params, mapping) where mapping is sanitized_name -> original_name.
+        """
         props = schema.get("properties", {})
         required = set(schema.get("required", []))
         type_map = {
@@ -609,16 +648,19 @@ class MCPManager:
             "array": "array",
         }
         params: list[ToolParameter] = []
+        param_map: dict[str, str] = {}
         for prop_name, prop in props.items():
+            sanitized_name = MCPManager._sanitize_tool_name(prop_name)
+            param_map[sanitized_name] = prop_name
             params.append(
                 ToolParameter(
-                    name=prop_name,
+                    name=sanitized_name,
                     type=type_map.get(prop.get("type", "string"), "string"),
                     description=prop.get("description", ""),
                     required=prop_name in required,
                 )
             )
-        return params
+        return params, param_map
 
     async def _persist_server(self, name: str) -> None:
         """Persist a server config to the DocumentStore."""

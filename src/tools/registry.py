@@ -224,9 +224,13 @@ class ToolRegistry:
                     "{ " + ", ".join(param_names) + " }" if param_names else "{}"
                 )
 
-                lines.append(f"  /** {tool.description} */")
+                # Sanitize description for TS comment — strip */ to prevent
+                # comment termination and code injection from untrusted input
+                safe_desc = tool.description.replace("*/", "* /")
+                lines.append(f"  /** {safe_desc} */")
+                safe_name = tool.name.replace("\\", "\\\\").replace('"', '\\"')
                 lines.append(
-                    f'  {method_name}: ({param_str}): Promise<unknown> => callTool("{tool.name}", {params_obj}),'
+                    f'  {method_name}: ({param_str}): Promise<unknown> => callTool("{safe_name}", {params_obj}),'
                 )
                 if i < len(tools) - 1:
                     lines.append("")
