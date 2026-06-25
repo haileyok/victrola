@@ -47,6 +47,7 @@ async def signal_bot(tmp_path):
     mock_http = MagicMock()
     mock_http.get = AsyncMock(return_value=MockResponse(json_data=[]))
     mock_http.post = AsyncMock(return_value=MockResponse(200))
+    mock_http.delete = AsyncMock(return_value=MockResponse(204))
 
     ctx = ToolContext(store=store, http_client=mock_http)
     registry = ToolRegistry()

@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 # Signal message body cap (similar to Discord's 2000 char limit)
 MAX_CHUNK = 1900
 POLL_INTERVAL_SECONDS = 2.0
+TYPING_REFRESH_SECONDS = 3.0
 
 
 class SignalBot:
@@ -76,7 +77,44 @@ class SignalBot:
         return f"{self._base_url}/v2/send"
 
     def _receive_url(self) -> str:
-        return f"{self._base_url}/v1/receive/{quote(self._bot_phone, safe='')}"
+        return (
+            f"{self._base_url}/v1/receive/{quote(self._bot_phone, safe='')}"
+            "?send_read_receipts=true"
+        )
+
+    def _typing_url(self) -> str:
+        return f"{self._base_url}/v1/typing-indicator/{quote(self._bot_phone, safe='')}"
+
+    async def _start_typing(self) -> None:
+        """Send a typing indicator to the operator."""
+        try:
+            await self._http_client.post(
+                self._typing_url(),
+                json={"recipient": self._operator_phone},
+                timeout=5.0,
+            )
+        except Exception:
+            logger.debug("Failed to send typing indicator", exc_info=True)
+
+    async def _stop_typing(self) -> None:
+        """Clear the typing indicator."""
+        try:
+            await self._http_client.delete(
+                self._typing_url(),
+                json={"recipient": self._operator_phone},
+                timeout=5.0,
+            )
+        except Exception:
+            logger.debug("Failed to stop typing indicator", exc_info=True)
+
+    async def _typing_loop(self, stop: asyncio.Event) -> None:
+        """Refresh the typing indicator periodically until stop is set."""
+        while not stop.is_set():
+            await self._start_typing()
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=TYPING_REFRESH_SECONDS)
+            except asyncio.TimeoutError:
+                pass
 
     async def start(self) -> None:
         """Poll signal-cli-rest-api for incoming messages until close() is called."""
@@ -241,13 +279,20 @@ class SignalBot:
                             self._session_rkey, last_id, summary
                         )
 
-            # Run agent
-            response = await self._agent.chat(
-                user_text,
-                conversation=messages,
-                on_compact=on_compact,
-                images=images or None,
-            )
+            # Run agent with a typing indicator while it thinks
+            typing_stop = asyncio.Event()
+            typing_task = asyncio.create_task(self._typing_loop(typing_stop))
+            try:
+                response = await self._agent.chat(
+                    user_text,
+                    conversation=messages,
+                    on_compact=on_compact,
+                    images=images or None,
+                )
+            finally:
+                typing_stop.set()
+                await typing_task
+                await self._stop_typing()
 
             # Save assistant response
             if response:
