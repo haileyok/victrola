@@ -503,6 +503,17 @@ class TestMemory:
         })
         assert resp.status_code == 422
 
+    def test_create_empty_content_rejected(self, app_client):
+        """Empty or whitespace-only content is rejected (mirrors memory.add tool)."""
+        resp = app_client.post("/api/memory", json={
+            "type": "factual", "scope": "topic", "content": "",
+        })
+        assert resp.status_code == 422
+        resp = app_client.post("/api/memory", json={
+            "type": "factual", "scope": "topic", "content": "   ",
+        })
+        assert resp.status_code == 422
+
     def test_create_self_singleton_conflict(self, app_client):
         # create first self entry
         app_client.post("/api/memory", json={
@@ -525,6 +536,21 @@ class TestMemory:
         assert resp.status_code == 200
         assert resp.json()["content"] == "updated content"
         assert resp.json()["metadata"]["tags"] == ["new-tag"]
+
+    def test_update_content_preserves_existing_tags(self, app_client):
+        """Content-only update must not clobber existing tags."""
+        create = app_client.post("/api/memory", json={
+            "type": "factual", "scope": "topic",
+            "content": "original", "tags": ["keep-me"],
+        })
+        entry_id = create.json()["id"]
+        # Update only content — tags should be preserved
+        resp = app_client.put(f"/api/memory/{entry_id}", json={
+            "content": "new content",
+        })
+        assert resp.status_code == 200
+        assert resp.json()["content"] == "new content"
+        assert resp.json()["metadata"]["tags"] == ["keep-me"]
 
     def test_delete(self, app_client):
         create = app_client.post("/api/memory", json={

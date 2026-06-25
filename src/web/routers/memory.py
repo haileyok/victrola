@@ -42,12 +42,14 @@ def _invalidate_search(executor: ToolExecutor):
         se.invalidate_cache()
 
 
-def _validate_entry(type: str, scope: str):
-    """Validate type and scope conventions (mirrors memory.add tool logic)."""
+def _validate_entry(type: str, scope: str, content: str = ""):
+    """Validate type, scope, and content conventions (mirrors memory.add tool logic)."""
     if type not in _VALID_TYPES:
         raise HTTPException(422, f"Type must be one of {sorted(_VALID_TYPES)}, got '{type}'")
     if not scope:
         raise HTTPException(422, "Scope is required")
+    if not content or not content.strip():
+        raise HTTPException(422, "Content is required")
     if type == "self" and scope != "self":
         raise HTTPException(422, "For type 'self', scope must be 'self'")
     if type == "skill" and not scope.startswith(_SCOPE_PATTERN):
@@ -85,7 +87,7 @@ async def create_memory(
     body: CreateMemoryEntryRequest,
     executor: ToolExecutor = Depends(get_executor),
 ) -> MemoryEntryResponse:
-    _validate_entry(body.type, body.scope)
+    _validate_entry(body.type, body.scope, body.content)
     ms = _get_memory_store(executor)
 
     # Guard: only one 'self' entry allowed
@@ -97,12 +99,20 @@ async def create_memory(
     if body.tags:
         metadata["tags"] = body.tags
 
-    entry = await ms.add_entry(
-        type=body.type,
-        scope=body.scope,
-        content=body.content,
-        metadata=metadata,
-    )
+    try:
+        entry = await ms.add_entry(
+            type=body.type,
+            scope=body.scope,
+            content=body.content,
+            metadata=metadata,
+        )
+    except Exception as e:
+        # Catch the race where two concurrent self-creates both pass
+        # has_self_entry() — the DB partial unique index rejects the
+        # second insert with an IntegrityError.
+        if "integrity" in str(e).lower() or "unique" in str(e).lower():
+            raise HTTPException(409, "A 'self' entry already exists. Use update instead.")
+        raise
     _invalidate_search(executor)
     return MemoryEntryResponse(**entry)
 
@@ -117,13 +127,18 @@ async def update_memory(
         raise HTTPException(422, "At least one of 'content' or 'tags' must be provided")
     ms = _get_memory_store(executor)
 
-    # Fetch current entry to merge metadata (mirrors memory.update tool)
+    # Verify the entry exists before attempting update
     current = await ms.get_entry(entry_id)
     if current is None:
         raise HTTPException(404, f"Memory entry {entry_id} not found")
 
-    metadata = current.get("metadata", {})
+    # Only pass metadata when tags are being updated — passing the
+    # stale pre-read metadata on a content-only update would race
+    # with a concurrent tag change (the store re-reads metadata
+    # inside its write lock when metadata=None).
+    metadata = None
     if body.tags is not None:
+        metadata = current.get("metadata", {})
         metadata["tags"] = body.tags
 
     updated = await ms.update_entry(
