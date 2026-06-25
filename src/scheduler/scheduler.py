@@ -369,6 +369,21 @@ class Scheduler:
         await self._save_task(task)
         return f"Schedule '{name}' condition code approval revoked."
 
+    async def run_now(self, name: str) -> str:
+        """Fire a scheduled task immediately on operator demand.
+
+        Goes through the full ``_fire`` path (condition evaluation if present
+        and approved, agent wake, ``last_run`` advancement) so it behaves
+        exactly like a real scheduled tick. The ``enabled`` flag is ignored —
+        the operator is explicitly requesting this fire.
+        """
+        task = self._tasks.get(name)
+        if task is None:
+            return f"Schedule '{name}' not found."
+        now = datetime.now(timezone.utc)
+        await self._fire(task, now)
+        return f"Schedule '{name}' fired."
+
     async def run(self) -> None:
         """Main scheduler loop. Run as a background asyncio task."""
         self._running = True

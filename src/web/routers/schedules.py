@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
@@ -9,7 +10,11 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from src.tools.executor import ToolExecutor
 from src.web.dependencies import get_executor
-from src.web.schemas import CreateScheduleRequest, ScheduleResponse
+from src.web.schemas import (
+    CreateScheduleRequest,
+    ScheduleResponse,
+    UpdateScheduleRequest,
+)
 
 router = APIRouter()
 
@@ -98,6 +103,51 @@ async def create_schedule(
             raise HTTPException(409, result)
         raise HTTPException(400, result)
     return _to_response(task)
+
+
+@router.put("/schedules/{name}", response_model=ScheduleResponse)
+async def update_schedule(
+    name: str,
+    body: UpdateScheduleRequest,
+    executor: ToolExecutor = Depends(get_executor),
+) -> ScheduleResponse:
+    scheduler = _get_scheduler(executor)
+    task = scheduler.get_task(name)
+    if task is None:
+        raise HTTPException(404, f"Schedule '{name}' not found")
+
+    # validate schedule expression before updating
+    if body.schedule is not None:
+        from src.scheduler.schedule import parse_schedule
+
+        try:
+            parse_schedule(body.schedule)
+        except ValueError as e:
+            raise HTTPException(400, f"Invalid schedule expression: {e}")
+
+    # Build update fields, normalizing empty condition_code to None so it
+    # can be cleared. update_task skips None-valued fields, so only send
+    # keys that were explicitly provided in the request body.
+    fields: dict[str, Any] = {}
+    if body.schedule is not None:
+        fields["schedule"] = body.schedule
+    if body.prompt is not None:
+        fields["prompt"] = body.prompt
+    if body.condition_code is not None:
+        cc = body.condition_code.strip()
+        fields["condition_code"] = cc if cc else None
+    if body.requires_net is not None:
+        fields["requires_net"] = body.requires_net
+    if body.secrets is not None:
+        fields["secrets"] = list(body.secrets)
+
+    if not fields:
+        raise HTTPException(400, "No fields to update")
+
+    result = await scheduler.update_task(name, **fields)
+    if result.startswith("Error:"):
+        raise HTTPException(400, result)
+    return _to_response(scheduler.get_task(name))
 
 
 @router.post("/schedules/{name}/enable", response_model=ScheduleResponse)
@@ -197,6 +247,22 @@ async def test_schedule(
         allow_net=task.requires_net,
     )
     return result
+
+
+@router.post("/schedules/{name}/run-now")
+async def run_now_schedule(
+    name: str,
+    executor: ToolExecutor = Depends(get_executor),
+) -> dict[str, Any]:
+    scheduler = _get_scheduler(executor)
+    task = scheduler.get_task(name)
+    if task is None:
+        raise HTTPException(404, f"Schedule '{name}' not found")
+
+    # Fire in the background — _fire may take minutes (full agent chat)
+    # and results are delivered through notification channels.
+    asyncio.create_task(scheduler.run_now(name))
+    return {"fired": True, "name": name}
 
 
 @router.delete("/schedules/{name}", status_code=204)

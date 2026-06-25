@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { Plus, Trash2, Power, PowerOff, FlaskConical, Check, X } from "lucide-react";
+import { Plus, Trash2, Power, PowerOff, FlaskConical, Check, X, Pencil, Play } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import type { Schedule } from "@/lib/types";
 import { Button } from "@/components/ui/button";
@@ -28,6 +28,15 @@ export function SchedulesView() {
   const [testResult, setTestResult] = useState<Record<string, unknown> | null>(null);
   const [testingName, setTestingName] = useState<string | null>(null);
   const [approveError, setApproveError] = useState<string | null>(null);
+  const [showEdit, setShowEdit] = useState(false);
+  const [editName, setEditName] = useState("");
+  const [editSchedule, setEditSchedule] = useState("");
+  const [editPrompt, setEditPrompt] = useState("");
+  const [editConditionCode, setEditConditionCode] = useState("");
+  const [editRequiresNet, setEditRequiresNet] = useState(false);
+  const [editSecretsInput, setEditSecretsInput] = useState("");
+  const [editError, setEditError] = useState("");
+  const [runningName, setRunningName] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -139,6 +148,54 @@ export function SchedulesView() {
     }
   };
 
+  const handleEdit = (s: Schedule) => {
+    setEditName(s.name);
+    setEditSchedule(s.schedule);
+    setEditPrompt(s.prompt);
+    setEditConditionCode(s.condition_code ?? "");
+    setEditRequiresNet(s.requires_net);
+    setEditSecretsInput((s.secrets ?? []).join(", "));
+    setEditError("");
+    setShowEdit(true);
+  };
+
+  const handleEditSave = async () => {
+    setEditError("");
+    if (!editSchedule || !editPrompt) {
+      setEditError("Schedule and prompt are required");
+      return;
+    }
+    try {
+      const secrets = editSecretsInput
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      await api.updateSchedule(editName, {
+        schedule: editSchedule,
+        prompt: editPrompt,
+        condition_code: editConditionCode || undefined,
+        requires_net: editRequiresNet,
+        secrets,
+      });
+      setShowEdit(false);
+      await refresh();
+    } catch (e) {
+      setEditError(e instanceof Error ? e.message : "Failed to update schedule");
+    }
+  };
+
+  const handleRunNow = async (s: Schedule) => {
+    setRunningName(s.name);
+    try {
+      await api.runScheduleNow(s.name);
+      await refresh();
+    } catch (e) {
+      console.error("Failed to run schedule:", e);
+    } finally {
+      setRunningName(null);
+    }
+  };
+
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center justify-between px-6 py-3">
@@ -237,6 +294,25 @@ export function SchedulesView() {
                         )}
                       </>
                     )}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      title="Run now"
+                      disabled={runningName === s.name}
+                      onClick={() => handleRunNow(s)}
+                    >
+                      <Play className="h-3.5 w-3.5 text-green-500" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      title="Edit"
+                      onClick={() => handleEdit(s)}
+                    >
+                      <Pencil className="h-3.5 w-3.5 text-blue-500" />
+                    </Button>
                     <Button
                       variant="ghost"
                       size="icon"
@@ -345,6 +421,71 @@ export function SchedulesView() {
           <pre className="overflow-x-auto rounded-md bg-zinc-900 p-3 text-xs text-zinc-100">
             <code>{JSON.stringify(testResult, null, 2)}</code>
           </pre>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showEdit} onOpenChange={setShowEdit}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Edit Schedule{editName ? `: ${editName}` : ""}</DialogTitle>
+          </DialogHeader>
+          <div className="flex flex-col gap-3">
+            {editError && <div className="text-sm text-red-500">{editError}</div>}
+            <div>
+              <label className="text-sm font-medium">Schedule expression</label>
+              <Input
+                value={editSchedule}
+                onChange={(e) => setEditSchedule(e.target.value)}
+                placeholder='e.g. "30m", "daily@9:00", "weekly@monday"'
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium">Prompt</label>
+              <Textarea
+                value={editPrompt}
+                onChange={(e) => setEditPrompt(e.target.value)}
+                placeholder="Instruction for the agent…"
+              />
+            </div>
+            <div className="border-t pt-3">
+              <div className="text-sm font-medium mb-1">
+                Condition script (optional)
+              </div>
+              <p className="text-xs text-muted-foreground mb-2">
+                TypeScript that runs on schedule before waking the agent. Call
+                <code className="mx-1 px-1 bg-muted rounded">output(&#123; wake: true &#125;)</code>
+                to wake, or
+                <code className="mx-1 px-1 bg-muted rounded">output(&#123; wake: false &#125;)</code>
+                to skip. Requires operator approval.
+              </p>
+              <Textarea
+                value={editConditionCode}
+                onChange={(e) => setEditConditionCode(e.target.value)}
+                placeholder="// Optional: TypeScript condition script"
+                className="font-mono text-xs"
+                rows={5}
+              />
+              <div className="flex items-center gap-4 mt-2">
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={editRequiresNet}
+                    onChange={(e) => setEditRequiresNet(e.target.checked)}
+                  />
+                  Requires network
+                </label>
+              </div>
+              <div className="mt-2">
+                <label className="text-sm font-medium">Secrets (comma-separated)</label>
+                <Input
+                  value={editSecretsInput}
+                  onChange={(e) => setEditSecretsInput(e.target.value)}
+                  placeholder="API_KEY, CALENDAR_URL"
+                />
+              </div>
+            </div>
+            <Button onClick={handleEditSave}>Save</Button>
+          </div>
         </DialogContent>
       </Dialog>
     </div>

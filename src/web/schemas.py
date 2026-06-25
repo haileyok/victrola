@@ -33,6 +33,14 @@ class CreateScheduleRequest(BaseModel):
     secrets: list[str] = []
 
 
+class UpdateScheduleRequest(BaseModel):
+    schedule: str | None = None
+    prompt: str | None = None
+    condition_code: str | None = None
+    requires_net: bool | None = None
+    secrets: list[str] | None = None
+
+
 class TestCodeRequest(BaseModel):
     params: dict = {}
 
