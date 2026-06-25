@@ -350,13 +350,24 @@ class DiscordBot:
         loaded = await self._load_conversation(thread_id)
 
         tracker = _UsageTracker()
+        timeout = CONFIG.discord_chat_timeout_seconds
         async with thread.typing():
-            response = await self._agent.chat(
-                user_text,
-                conversation=loaded,
-                on_event=tracker.on_event,
-                images=images or None,
-            )
+            try:
+                response = await asyncio.wait_for(
+                    self._agent.chat(
+                        user_text,
+                        conversation=loaded,
+                        on_event=tracker.on_event,
+                        images=images or None,
+                    ),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                await thread.send(
+                    f"⚠️ Agent timed out after {timeout}s. The conversation "
+                    f"was not corrupted — you can send another message."
+                )
+                return
 
         # save assistant response
         if response:
