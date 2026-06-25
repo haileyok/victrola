@@ -110,13 +110,27 @@ def _wire_scheduler(executor: ToolExecutor, agent: Agent) -> None:
     if executor.scheduler is not None:
 
         async def on_schedule_fire(task_name: str, prompt: str) -> str:
-            response = await agent.chat(
-                f"[Scheduled task: {task_name}] {prompt}", conversation=[]
-            )
-            if response:
-                await _send_default_notification(
-                    executor, response, title=f"Scheduled: {task_name}"
+            try:
+                response = await agent.chat(
+                    f"[Scheduled task: {task_name}] {prompt}", conversation=[]
                 )
+            except Exception:
+                logger.exception("Scheduled task '%s' raised an exception", task_name)
+                await _send_default_notification(
+                    executor,
+                    f"Scheduled task '{task_name}' raised an exception. "
+                    "Check victrola.log for details.",
+                    title=f"Error: {task_name}",
+                )
+                raise
+
+            if not response:
+                await _send_default_notification(
+                    executor,
+                    f"Scheduled task '{task_name}' returned an empty response.",
+                    title=f"Error: {task_name}",
+                )
+
             return response
 
         executor.scheduler._on_fire = on_schedule_fire
@@ -141,7 +155,11 @@ def _wire_scheduler(executor: ToolExecutor, agent: Agent) -> None:
 async def _send_default_notification(
     executor: ToolExecutor, content: str, title: str = ""
 ) -> None:
-    """Send a notification to the default channel (Signal if configured, else Discord).
+    """Send an error notification to the default channel (Signal if configured, else Discord).
+
+    Only called as a safety net when a scheduled task raises an exception or
+    returns an empty response. Normal scheduled results are the agent's
+    responsibility — it decides whether to notify via `notify.send`.
 
     Uses executor.ctx.http_client for HTTP calls. Logs errors but does not
     raise — scheduled task results should not crash the scheduler.
