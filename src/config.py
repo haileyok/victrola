@@ -56,6 +56,10 @@ class Config(BaseSettings):
     signal_session_rkey: str = "signal-persistent"
     """rkey for the persistent Signal chat session in ChatStore"""
 
+    # compaction
+    compact_threshold_chars: int = 240_000
+    """conversation char limit before auto-compaction kicks in (~4 chars/token)"""
+
     # exa web search
     exa_api_key: str = ""
     """api key for Exa web search"""

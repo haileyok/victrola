@@ -100,6 +100,7 @@ def build_services(
         model_endpoint=model_endpoint or CONFIG.model_endpoint or None,
         tool_executor=executor,
         sub_llm_client=llm_client,
+        compact_threshold_chars=CONFIG.compact_threshold_chars,
     )
 
     return executor, agent
