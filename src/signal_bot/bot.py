@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 from typing import TYPE_CHECKING, Any
@@ -77,6 +78,10 @@ class SignalBot:
         return f"{self._base_url}/v2/send"
 
     def _receive_url(self) -> str:
+        # send_read_receipts=true marks messages as read as they're consumed
+        # from the destructive receive endpoint. This applies to all fetched
+        # messages before sender validation — non-operator messages are also
+        # marked read, since the API doesn't support per-message receipts.
         return (
             f"{self._base_url}/v1/receive/{quote(self._bot_phone, safe='')}"
             "?send_read_receipts=true"
@@ -293,7 +298,8 @@ class SignalBot:
                 )
             finally:
                 typing_stop.set()
-                await typing_task
+                with contextlib.suppress(asyncio.CancelledError):
+                    await typing_task
                 await self._stop_typing()
 
             # Save assistant response

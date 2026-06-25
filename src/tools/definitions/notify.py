@@ -116,9 +116,6 @@ async def signal(
 
     message = f"{title}\n\n{content}" if title else content
 
-    from urllib.parse import quote
-
-    bot_phone = quote(CONFIG.signal_bot_phone, safe="")
     send_url = f"http://{CONFIG.signal_service}/v2/send"
 
     sent = 0

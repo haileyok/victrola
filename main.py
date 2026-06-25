@@ -175,9 +175,7 @@ async def _send_default_notification(
         and CONFIG.signal_operator_phone
     ):
         from src.utils.text import _chunk
-        from urllib.parse import quote
 
-        bot_phone = quote(CONFIG.signal_bot_phone, safe="")
         send_url = f"http://{CONFIG.signal_service}/v2/send"
 
         for chunk in _chunk(message):

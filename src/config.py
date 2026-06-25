@@ -51,7 +51,8 @@ class Config(BaseSettings):
     """E.164 phone number of the bot's Signal account (e.g. '+1234567890')"""
 
     signal_operator_phone: str = ""
-    """E.164 phone number of the operator's Signal account"""
+    """Phone number or UUID identifying the operator's Signal account.
+    Username-only accounts are matched via sourceUuid on receive."""
 
     signal_session_rkey: str = "signal-persistent"
     """rkey for the persistent Signal chat session in ChatStore"""

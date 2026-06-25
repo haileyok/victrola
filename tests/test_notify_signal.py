@@ -47,7 +47,7 @@ async def test_notify_signal_sends_message():
 
         # Verify the URL and payload
         call_args = ctx.http_client.post.call_args
-        assert "v2/send" in call_args.args[0]
+        assert call_args.args[0] == "http://127.0.0.1:8080/v2/send"
         payload = call_args.kwargs["json"]
         assert payload["message"] == "hello world"
         assert payload["number"] == "+1111111111"
@@ -130,7 +130,7 @@ async def test_notify_send_routes_to_signal():
         result = await send(ctx, "test message")
 
         assert result["success"] is True
-        assert "v2/send" in ctx.http_client.post.call_args.args[0]
+        assert ctx.http_client.post.call_args.args[0] == "http://127.0.0.1:8080/v2/send"
 
 
 async def test_notify_send_falls_back_to_discord():
