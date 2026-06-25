@@ -171,7 +171,7 @@ class ChatScreen(Screen):
                 try:
                     from src.agent.conversation import maybe_generate_session_title
 
-                    store = self.app.executor._ctx._store  # type: ignore[attr-defined]
+                    store = self.app.executor.store  # type: ignore[attr-defined]
                     if store is not None:
                         await maybe_generate_session_title(
                             store, self.session_id, conv_manager._llm if conv_manager else None
@@ -210,7 +210,7 @@ class ChatScreen(Screen):
     async def _refresh_pending_banner(self) -> None:
         """Show a banner at the top of the chat log if any custom tools are pending review."""
         executor = self.app.executor  # type: ignore[attr-defined]
-        manager = getattr(executor, "_custom_tool_manager", None)
+        manager = executor.custom_tool_manager
         banner = self.query_one("#pending-banner", Static)
         if manager is None:
             banner.add_class("hidden")

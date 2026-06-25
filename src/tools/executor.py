@@ -31,6 +31,36 @@ class ToolExecutor:
         self._secret_manager: Any | None = None
         self._scheduler: Any | None = None
 
+    # -- public read-only properties for TUI/Discord/main.py --
+
+    @property
+    def store(self) -> Any:
+        return self._ctx._store
+
+    @property
+    def secret_manager(self) -> Any | None:
+        return self._secret_manager
+
+    @property
+    def custom_tool_manager(self) -> Any | None:
+        return self._custom_tool_manager
+
+    @property
+    def scheduler(self) -> Any | None:
+        return self._scheduler
+
+    @property
+    def http_client(self) -> Any:
+        return self._ctx._http_client
+
+    @property
+    def llm_client(self) -> Any:
+        return self._ctx._llm_client
+
+    @property
+    def exa_client(self) -> Any:
+        return self._ctx._exa_client
+
     async def initialize(self) -> None:
         from src.config import CONFIG
 
