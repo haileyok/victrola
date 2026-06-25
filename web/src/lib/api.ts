@@ -248,7 +248,7 @@ export const api = {
   deleteMemory: (id: number) =>
     fetchJSON<void>(`${API_BASE}/memory/${id}`, { method: "DELETE" }),
 
-  searchMemory: (query: string, type?: string, types?: string[], scope?: string, tags?: string[], limit = 20) =>
+  searchMemory: (query: string, type?: string, types?: string[], scope?: string, tags?: string[], limit = 50) =>
     fetchJSON<MemorySearchResponse>(`${API_BASE}/memory/search`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
