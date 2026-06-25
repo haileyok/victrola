@@ -271,17 +271,20 @@ const params = {params_json};
         if process.stderr is None:
             raise RuntimeError("Process stderr is not available")
 
+        # Maximum stderr bytes to capture (prevents memory exhaustion)
+        MAX_STDERR_SIZE = 64 * 1024
+
         outputs: list[Any] = []
         debug_messages: list[str] = []
         error: str | None = None
         tool_call_count = 0
         total_output_bytes = 0
-        deadline = asyncio.get_event_loop().time() + MAX_EXECUTION_TIME
+        deadline = asyncio.get_running_loop().time() + MAX_EXECUTION_TIME
 
         try:
             while True:
                 # calculate remaining time against the total execution deadline
-                remaining = deadline - asyncio.get_event_loop().time()
+                remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     self._kill_process(process)
                     error = f"execution timed out after {MAX_EXECUTION_TIME:.0f} seconds (total)"
@@ -295,6 +298,11 @@ const params = {params_json};
 
                 # if there are no more lines we're finished...
                 if not line:
+                    # Empty stdout before any tool call. If the process
+                    # exited with an error, treat it as a crash.
+                    # Otherwise it's a clean exit (empty output).
+                    if process.returncode is not None and process.returncode != 0 and tool_call_count == 0:
+                        error = f"deno process exited early with code {process.returncode}"
                     break
 
                 line_str = line.decode().strip()
@@ -363,7 +371,26 @@ const params = {params_json};
 
         await process.wait()
 
-        stderr_content = await process.stderr.read()
+        # Read stderr with a size cap to prevent memory exhaustion
+        stderr_chunks: list[bytes] = []
+        stderr_total = 0
+        while True:
+            chunk = await process.stderr.read(MAX_STDERR_SIZE)
+            if not chunk:
+                break
+            stderr_total += len(chunk)
+            if stderr_total <= MAX_STDERR_SIZE:
+                stderr_chunks.append(chunk)
+            else:
+                # Truncate — keep what fits and add a marker
+                excess = stderr_total - MAX_STDERR_SIZE
+                keep = len(chunk) - excess
+                if keep > 0:
+                    stderr_chunks.append(chunk[:keep])
+                stderr_chunks.append(b"\n... (stderr truncated)")
+                break
+        stderr_content = b"".join(stderr_chunks)
+
         if stderr_content:
             stderr_str = stderr_content.decode().strip()
             if stderr_str:
@@ -371,6 +398,11 @@ const params = {params_json};
                     error += f"\n\nStderr:\n{stderr_str}"
                 else:
                     error = stderr_str
+
+        # After wait(), returncode is guaranteed to be an int.
+        # Treat any non-zero exit as an error, even if error is already set.
+        if process.returncode != 0 and error is None:
+            error = f"deno process exited with code {process.returncode}"
 
         success = process.returncode == 0 and error is None
 
