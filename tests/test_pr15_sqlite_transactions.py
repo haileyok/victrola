@@ -4,7 +4,7 @@ import asyncio
 import pytest
 from pathlib import Path
 
-from src.store.store import Store, StoreNotFound
+from src.store.store import Store, StoreNotFound, StoreConflict
 
 
 @pytest.fixture
@@ -29,9 +29,9 @@ async def test_document_create_uses_transaction(store):
 
 @pytest.mark.asyncio
 async def test_document_create_duplicate_raises(store):
-    """Duplicate create should raise StoreNotFound (or StoreConflict in PR 16)."""
+    """Duplicate create should raise StoreConflict (StoreNotFound on pre-PR16)."""
     await store.documents.create("dup_key", "first")
-    with pytest.raises(StoreNotFound):
+    with pytest.raises((StoreNotFound, StoreConflict)):
         await store.documents.create("dup_key", "second")
 
 
