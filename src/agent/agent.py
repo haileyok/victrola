@@ -129,6 +129,10 @@ class AnthropicClient(AgentClient):
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
         self._model_name = model_name
 
+    async def aclose(self) -> None:
+        """Close the underlying AsyncAnthropic client."""
+        await self._client.close()
+
     async def complete(
         self,
         messages: list[dict[str, Any]],
@@ -238,6 +242,10 @@ class OpenAICompatibleClient(AgentClient):
         self._model_name = model_name
         self._endpoint = endpoint.rstrip("/")
         self._http = httpx.AsyncClient(timeout=300.0)
+
+    async def aclose(self) -> None:
+        """Close the underlying httpx AsyncClient."""
+        await self._http.aclose()
 
     async def complete(
         self,
@@ -594,6 +602,10 @@ class Agent:
         if self._system_prompt_provider is not None:
             self._system_prompt = await self._system_prompt_provider()
         return self._system_prompt or ""
+
+    async def aclose(self) -> None:
+        """Close the underlying LLM client and free resources."""
+        await self._client.aclose()
 
     # number of messages from the end to preserve full tool results
     TOOL_RESULT_PRESERVE_COUNT = 4
