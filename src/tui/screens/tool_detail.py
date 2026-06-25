@@ -40,13 +40,13 @@ class ToolDetailScreen(Screen):
         executor = getattr(self.app, "executor", None)
         if executor is None:
             return None
-        return getattr(executor, "_custom_tool_manager", None)
+        return executor.custom_tool_manager
 
     def _secret_manager(self) -> Any:
         executor = getattr(self.app, "executor", None)
         if executor is None:
             return None
-        return getattr(executor, "_secret_manager", None)
+        return executor.secret_manager
 
     def compose(self) -> ComposeResult:
         yield Header(name=f"Tool: {self._tool_name}")

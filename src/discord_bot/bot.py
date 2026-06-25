@@ -288,7 +288,7 @@ class DiscordBot:
         self, message: discord.Message, thread: discord.Thread
     ) -> None:
         """Route an operator message into a session and run the agent."""
-        store = self._executor._ctx._store
+        store = self._executor.store
         if store is None or store.chat is None:
             await thread.send("⚠️ Local store not initialized.")
             return
@@ -356,7 +356,7 @@ class DiscordBot:
             from src.agent.conversation import maybe_generate_session_title
 
             title = await maybe_generate_session_title(
-                store, thread_id, self._executor._ctx._llm_client
+                store, thread_id, self._executor.llm_client
             )
             if title:
                 try:
@@ -368,7 +368,7 @@ class DiscordBot:
 
     async def _load_conversation(self, thread_id: str) -> list[dict[str, Any]]:
         """Load a session's full message history in agent.chat() format."""
-        store = self._executor._ctx._store
+        store = self._executor.store
         if store is None or store.chat is None:
             raise RuntimeError("Store or ChatStore is not initialized")
 

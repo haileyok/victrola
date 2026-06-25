@@ -485,6 +485,36 @@ class Agent:
         self._sub_llm_client = sub_llm_client
         self._compact_threshold_chars = compact_threshold_chars
 
+    # -- public read-only properties for TUI/Discord --
+
+    @property
+    def client(self) -> AgentClient:
+        """Return the underlying LLM client."""
+        return self._client
+
+    @property
+    def system_prompt(self) -> str | None:
+        """Return the current system prompt."""
+        return self._system_prompt
+
+    @system_prompt.setter
+    def system_prompt(self, value: str | None) -> None:
+        self._system_prompt = value
+
+    @property
+    def system_prompt_provider(self) -> Any:
+        return self._system_prompt_provider
+
+    @system_prompt_provider.setter
+    def system_prompt_provider(self, value: Any) -> None:
+        self._system_prompt_provider = value
+
+    async def refresh_system_prompt(self) -> str:
+        """Call the system prompt provider and update the cached prompt."""
+        if self._system_prompt_provider is not None:
+            self._system_prompt = await self._system_prompt_provider()
+        return self._system_prompt or ""
+
     # number of messages from the end to preserve full tool results
     TOOL_RESULT_PRESERVE_COUNT = 4
 
