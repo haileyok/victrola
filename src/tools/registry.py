@@ -39,6 +39,7 @@ class ToolContext:
         self._http_client = http_client
         self._store = store
         self._custom_tool_manager: Any | None = None
+        self._mcp_manager: Any | None = None
         self._secret_manager: Any | None = None
         self._scheduler: Any | None = None
         self._embedding_client: Any | None = None
@@ -73,6 +74,10 @@ class ToolContext:
         return self._custom_tool_manager
 
     @property
+    def mcp_manager(self) -> Any:
+        return self._mcp_manager
+
+    @property
     def secret_manager(self) -> Any:
         return self._secret_manager
 
@@ -101,6 +106,10 @@ class ToolRegistry:
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
+
+    def unregister(self, name: str) -> bool:
+        """Remove a tool from the registry. Returns True if it existed."""
+        return self._tools.pop(name, None) is not None
 
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
@@ -160,7 +169,7 @@ class ToolRegistry:
             lines.append(f"## {namespace}\n")
             for tool in sorted(tools, key=lambda t: t.name):
                 lines.append(f"### {tool.name}")
-                lines.append(f"{tool.description}\n")
+                lines.append(f"{self._sanitize_md(tool.description)}\n")
                 if tool.parameters:
                     lines.append("**Parameters:**")
                     for param in tool.parameters:
@@ -171,7 +180,7 @@ class ToolRegistry:
                             else ""
                         )
                         lines.append(
-                            f"- `{param.name}` ({param.type}{req}{default}): {param.description}"
+                            f"- `{param.name}` ({param.type}{req}{default}): {self._sanitize_md(param.description)}"
                         )
                     lines.append("")
 
@@ -215,9 +224,13 @@ class ToolRegistry:
                     "{ " + ", ".join(param_names) + " }" if param_names else "{}"
                 )
 
-                lines.append(f"  /** {tool.description} */")
+                # Sanitize description for TS comment — strip */ to prevent
+                # comment termination and code injection from untrusted input
+                safe_desc = tool.description.replace("*/", "* /")
+                lines.append(f"  /** {safe_desc} */")
+                safe_name = tool.name.replace("\\", "\\\\").replace('"', '\\"')
                 lines.append(
-                    f'  {method_name}: ({param_str}): Promise<unknown> => callTool("{tool.name}", {params_obj}),'
+                    f'  {method_name}: ({param_str}): Promise<unknown> => callTool("{safe_name}", {params_obj}),'
                 )
                 if i < len(tools) - 1:
                     lines.append("")
@@ -245,6 +258,23 @@ class ToolRegistry:
         if isinstance(value, str):
             return f'"{value}"'
         return str(value)
+
+    @staticmethod
+    def _sanitize_md(text: str) -> str:
+        """Strip markdown control characters from untrusted text.
+
+        Prevents heading injection and code fence injection from MCP
+        tool descriptions in the system prompt docs.
+        """
+        lines = text.split("\n")
+        sanitized_lines = []
+        for line in lines:
+            # strip leading # markers that could inject fake headings
+            stripped = line.lstrip("#")
+            sanitized_lines.append(stripped)
+        result = "\n".join(sanitized_lines)
+        # neutralize backtick-fenced code blocks
+        return result.replace("```", "\\`\\`\\`")
 
 
 TOOL_REGISTRY = ToolRegistry()

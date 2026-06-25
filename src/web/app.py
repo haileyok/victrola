@@ -13,6 +13,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from src.config import CONFIG
 from src.web.routers import (
     chat,
+    mcp,
     schedules,
     secrets,
     sessions,
@@ -74,6 +75,7 @@ def create_app(agent, executor, conversation_manager) -> FastAPI:
     app.include_router(tools.router, prefix="/api")
     app.include_router(secrets.router, prefix="/api")
     app.include_router(schedules.router, prefix="/api")
+    app.include_router(mcp.router, prefix="/api")
     app.include_router(system_prompt.router, prefix="/api")
 
     static_dir = Path(__file__).parent / "static"

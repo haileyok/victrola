@@ -76,6 +76,37 @@ export interface SystemPrompt {
   token_estimate: number;
 }
 
+// -- MCP types --
+
+export interface MCPServerSummary {
+  name: string;
+  transport: string;
+  enabled: boolean;
+  connected: boolean;
+  tools_total: number;
+  tools_approved: number;
+}
+
+export interface MCPToolSummary {
+  name: string;
+  description: string;
+  approved: boolean;
+}
+
+export interface MCPServerDetail {
+  name: string;
+  transport: string;
+  url: string | null;
+  command: string | null;
+  args: string[];
+  auth_token_secret: string | null;
+  auth_token_status: string;
+  env_secrets: { name: string; status: string }[];
+  enabled: boolean;
+  connected: boolean;
+  tools: MCPToolSummary[];
+}
+
 // -- SSE event types --
 
 export interface ChatSSEEvent {

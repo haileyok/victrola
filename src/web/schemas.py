@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, Literal
+
 from pydantic import BaseModel
 
 
@@ -70,6 +72,8 @@ class StatusResponse(BaseModel):
     secrets: int
     custom_tools_approved: int
     custom_tools_pending: int
+    mcp_servers: int = 0
+    mcp_tools_approved: int = 0
 
 
 class ToolSummary(BaseModel):
@@ -112,3 +116,50 @@ class SystemPromptResponse(BaseModel):
     text: str
     char_count: int
     token_estimate: int
+
+
+# -- MCP models --
+
+
+class CreateMCPServerRequest(BaseModel):
+    name: str
+    transport: Literal["sse", "stdio"]
+    url: str | None = None
+    command: str | None = None
+    args: list[str] = []
+    auth_token_secret: str | None = None
+    env_secrets: list[str] = []
+    enabled: bool = True
+
+
+class MCPServerSummary(BaseModel):
+    name: str
+    transport: str
+    enabled: bool
+    connected: bool
+    tools_total: int
+    tools_approved: int
+
+
+class MCPToolSummary(BaseModel):
+    name: str
+    description: str
+    approved: bool
+
+
+class MCPServerDetail(BaseModel):
+    name: str
+    transport: str
+    url: str | None
+    command: str | None
+    args: list[str]
+    auth_token_secret: str | None
+    auth_token_status: str  # "set" | "missing" | "none"
+    env_secrets: list[dict[str, str]]  # [{"name": ..., "status": "set"|"missing"}]
+    enabled: bool
+    connected: bool
+    tools: list[MCPToolSummary]
+
+
+class ToolActionRequest(BaseModel):
+    tool_name: str
