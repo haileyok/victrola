@@ -164,8 +164,7 @@ async def connect_server(
     if config.auth_type == "oauth":
         import asyncio
         asyncio.create_task(mgr.connect_server(name))
-        # Give it a moment to generate the consent URL
-        await asyncio.sleep(0.5)
+        # Return immediately — the frontend will poll for the consent URL
         config = mgr.get_server(name)
         return await _server_to_detail_async(config, mgr, sm)
 
