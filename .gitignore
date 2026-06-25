@@ -21,3 +21,5 @@ victrola.log
 web/node_modules/
 web/*.tsbuildinfo
 web/dist-tsconfig/
+
+.worktrees/
