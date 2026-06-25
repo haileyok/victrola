@@ -3,7 +3,7 @@
 Three focused stores sharing one SQLite connection:
 - DocumentStore: flat rkey -> content (notes, skills, custom tool defs)
 - RecordStore: (collection, rkey) -> JSON (general-purpose namespaced records)
-- ChatStore: sessions + append-only messages for TUI transcripts
+- ChatStore: sessions + append-only messages for chat transcripts
 """
 
 import json
@@ -345,7 +345,7 @@ class RecordStore:
 class ChatStore:
     """Agent chat: sessions and their append-only messages.
 
-    Used for persisted TUI transcripts across conversations.
+    Used for persisted chat transcripts across conversations.
     """
 
     def __init__(self, db: aiosqlite.Connection) -> None:

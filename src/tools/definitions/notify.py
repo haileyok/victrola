@@ -15,7 +15,7 @@ MAX_CONTENT = 2000
     name="notify.discord",
     description="""Send a message to Discord via webhook. Useful for alerting the operator about background events — scheduled task results, findings that need attention, errors, etc.
 
-Requires a secret named `DISCORD_WEBHOOK_URL` (a webhook URL from a Discord channel's integration settings). The operator configures it via the Secrets screen in the TUI.
+Requires a secret named `DISCORD_WEBHOOK_URL` (a webhook URL from a Discord channel's integration settings). The operator configures it via the Secrets page in the web interface.
 
 If `title` is provided the message renders as an embed with the title as a heading; otherwise as a plain message. Discord limits content to 2000 characters and this tool truncates beyond that.""",
     parameters=[
@@ -47,7 +47,7 @@ async def discord(
         return {
             "error": (
                 f"Discord webhook not configured. Set the `{DISCORD_WEBHOOK_SECRET}` "
-                "secret via the TUI (press 's' from the session list)."
+                "secret via the web interface (Secrets page)."
             )
         }
 

@@ -242,7 +242,7 @@ def main(
             _wire_scheduler(executor, agent)
 
             async def _refresh_prompt() -> str:
-                return await _load_system_prompt(executor._ctx, executor)
+                return await _load_system_prompt(executor.ctx, executor)
 
             agent.system_prompt_provider = _refresh_prompt
             agent.system_prompt = await _refresh_prompt()
@@ -283,7 +283,7 @@ def chat(
             await executor.initialize()
 
             async def _refresh_prompt() -> str:
-                return await _load_system_prompt(executor._ctx, executor)
+                return await _load_system_prompt(executor.ctx, executor)
 
             agent.system_prompt_provider = _refresh_prompt
             agent.system_prompt = await _refresh_prompt()
@@ -312,9 +312,9 @@ def chat(
         print("\nExiting.")
 
 
-@cli.command(name="tui")
+@cli.command(name="serve")
 @shared_options
-def tui(
+def serve(
     model_api: Literal["anthropic", "openai", "openapi"] | None,
     model_name: str | None,
     model_api_key: str | None,
@@ -327,13 +327,60 @@ def tui(
         model_endpoint=model_endpoint,
     )
 
-    from src.tui import VictrolaApp
+    async def run():
+        try:
+            await executor.initialize()
+            _wire_scheduler(executor, agent)
 
-    app = VictrolaApp(
-        agent=agent,
-        executor=executor,
-    )
-    app.run()
+            async def _refresh_prompt() -> str:
+                return await _load_system_prompt(executor.ctx, executor)
+
+            agent.system_prompt_provider = _refresh_prompt
+            agent.system_prompt = await _refresh_prompt()
+
+            from src.agent.conversation import ConversationManager
+
+            conversation_manager = ConversationManager(
+                ctx=executor.ctx, llm_client=executor.llm_client
+            )
+
+            discord_bot = _build_discord_bot(executor, agent)
+
+            from src.web.app import create_app
+
+            import uvicorn
+
+            async with asyncio.TaskGroup() as tg:
+                if executor.scheduler:
+                    tg.create_task(executor.scheduler.run())
+                if discord_bot is not None:
+                    tg.create_task(discord_bot.start())
+                config = uvicorn.Config(
+                    create_app(agent, executor, conversation_manager),
+                    host="127.0.0.1",
+                    port=8000,
+                    log_level="info",
+                )
+                server = uvicorn.Server(config)
+
+                async def _serve_and_stop():
+                    """Run uvicorn, then stop the scheduler/Discord bot on exit."""
+                    try:
+                        await server.serve()
+                    finally:
+                        if executor.scheduler:
+                            executor.scheduler.stop()
+                        if discord_bot is not None:
+                            await discord_bot.close()
+
+                tg.create_task(_serve_and_stop())
+        finally:
+            await agent.aclose()
+
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        logger.info("received keyboard interrupt")
 
 
 if __name__ == "__main__":

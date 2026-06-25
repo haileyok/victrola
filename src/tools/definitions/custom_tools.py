@@ -19,7 +19,7 @@ async def list_available_secrets(ctx: ToolContext) -> str:
 
     names = sm.list_secret_names()
     if not names:
-        return "No secrets configured. Ask the human operator to add secrets via the TUI (press 's' from the session list)."
+        return "No secrets configured. Ask the human operator to add secrets via the web interface (Secrets page)"
 
     lines = [f"Available secrets ({len(names)}):\n"]
     for name in names:
