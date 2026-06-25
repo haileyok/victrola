@@ -31,7 +31,7 @@ def test_no_asserts_in_target_files():
         "src/agent/conversation.py",
         "src/store/store.py",
         "src/tools/custom.py",
-        "src/tools/definitions/notes.py",
+        "src/tools/definitions/memory.py",
         "src/tools/executor.py",
         "src/discord_bot/bot.py",
         "src/scheduler/schedule.py",

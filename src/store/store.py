@@ -6,6 +6,7 @@ Three focused stores sharing one SQLite connection:
 - ChatStore: sessions + append-only messages for chat transcripts
 """
 
+import asyncio
 import json
 import logging
 import secrets
@@ -41,14 +42,21 @@ def _new_rkey() -> str:
 
 
 class Store:
-    """Owns the SQLite connection and exposes the three concept stores."""
+    """Owns the SQLite connection and exposes the three concept stores.
+
+    A single asyncio.Lock serializes all write transactions across every
+    sub-store to prevent "cannot start a transaction within a transaction"
+    on the shared aiosqlite.Connection.
+    """
 
     def __init__(self, path: Path) -> None:
         self._path = path
         self._db: aiosqlite.Connection | None = None
+        self._write_lock = asyncio.Lock()
         self.documents: DocumentStore | None = None
         self.records: RecordStore | None = None
         self.chat: ChatStore | None = None
+        self.memory: MemoryStore | None = None
 
     async def initialize(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -57,9 +65,14 @@ class Store:
         await self._db.execute("PRAGMA foreign_keys=ON")
         await self._create_schema()
         await self._db.commit()
-        self.documents = DocumentStore(self._db)
-        self.records = RecordStore(self._db)
-        self.chat = ChatStore(self._db)
+        self.documents = DocumentStore(self._db, self._write_lock)
+        self.records = RecordStore(self._db, self._write_lock)
+        self.chat = ChatStore(self._db, self._write_lock)
+        from src.memory.store import MemoryStore
+
+        self.memory = MemoryStore(
+            self._db, fts5_available=self._fts5_available, write_lock=self._write_lock
+        )
         logger.info("Store initialized at %s", self._path)
 
     async def close(self) -> None:
@@ -105,9 +118,71 @@ class Store:
 
             CREATE INDEX IF NOT EXISTS chat_messages_by_session
                 ON chat_messages(session_id, id);
+
+            CREATE TABLE IF NOT EXISTS memory_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                type TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                content TEXT NOT NULL,
+                metadata TEXT DEFAULT '{}',
+                embedding BLOB,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS memory_entries_by_type
+                ON memory_entries(type);
+            CREATE INDEX IF NOT EXISTS memory_entries_by_scope
+                ON memory_entries(scope);
+            CREATE INDEX IF NOT EXISTS memory_entries_by_type_scope
+                ON memory_entries(type, scope);
+
+            CREATE UNIQUE INDEX IF NOT EXISTS memory_self_singleton
+                ON memory_entries(scope) WHERE type = 'self';
+
+            CREATE TABLE IF NOT EXISTS memory_config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             """
         )
 
+        # FTS5 is optional — runtime check with LIKE fallback
+        self._fts5_available = False
+        try:
+            await self._db.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS memory_entries_fts "
+                "USING fts5(content, content='memory_entries', content_rowid='id')"
+            )
+            await self._db.executescript(
+                """
+                CREATE TRIGGER IF NOT EXISTS memory_fts_insert
+                AFTER INSERT ON memory_entries BEGIN
+                    INSERT INTO memory_entries_fts(rowid, content)
+                    VALUES (new.id, new.content);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS memory_fts_delete
+                AFTER DELETE ON memory_entries BEGIN
+                    INSERT INTO memory_entries_fts(memory_entries_fts, rowid, content)
+                    VALUES('delete', old.id, old.content);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS memory_fts_update
+                AFTER UPDATE ON memory_entries BEGIN
+                    INSERT INTO memory_entries_fts(memory_entries_fts, rowid, content)
+                    VALUES('delete', old.id, old.content);
+                    INSERT INTO memory_entries_fts(rowid, content)
+                    VALUES (new.id, new.content);
+                END;
+                """
+            )
+            self._fts5_available = True
+        except Exception as e:
+            logger.warning(
+                "FTS5 not available — falling back to LIKE keyword search: %s", e
+            )
+        await self._db.execute("PRAGMA foreign_keys=ON")
 
 class DocumentStore:
     """Agent documents: flat rkey -> content.
@@ -116,44 +191,47 @@ class DocumentStore:
     custom tool definitions (`customtool:*` entries).
     """
 
-    def __init__(self, db: aiosqlite.Connection) -> None:
+    def __init__(self, db: aiosqlite.Connection, write_lock: asyncio.Lock | None = None) -> None:
         self._db = db
+        self._write_lock = write_lock or asyncio.Lock()
 
     async def create(self, rkey: str, content: str) -> dict[str, Any]:
         now = _now()
-        try:
-            await self._db.execute("BEGIN IMMEDIATE")
-            await self._db.execute(
-                "INSERT INTO agent_documents (rkey, content, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?)",
-                (rkey, content, now, now),
-            )
-            await self._db.commit()
-        except aiosqlite.IntegrityError as e:
-            await self._db.rollback()
-            raise StoreConflict(f"agent_document '{rkey}' already exists") from e
-        except Exception:
-            await self._db.rollback()
-            raise
+        async with self._write_lock:
+            try:
+                await self._db.execute("BEGIN IMMEDIATE")
+                await self._db.execute(
+                    "INSERT INTO agent_documents (rkey, content, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (rkey, content, now, now),
+                )
+                await self._db.commit()
+            except aiosqlite.IntegrityError as e:
+                await self._db.rollback()
+                raise StoreConflict(f"agent_document '{rkey}' already exists") from e
+            except Exception:
+                await self._db.rollback()
+                raise
         return {"rkey": rkey, "content": content, "createdAt": now, "updatedAt": now}
 
     async def update(self, rkey: str, content: str) -> dict[str, Any]:
         now = _now()
-        try:
-            await self._db.execute("BEGIN IMMEDIATE")
-            cur = await self._db.execute(
-                "UPDATE agent_documents SET content = ?, updated_at = ? WHERE rkey = ?",
-                (content, now, rkey),
-            )
-            if cur.rowcount == 0:
+        async with self._write_lock:
+            try:
+                await self._db.execute("BEGIN IMMEDIATE")
+                cur = await self._db.execute(
+                    "UPDATE agent_documents SET content = ?, updated_at = ? WHERE rkey = ?",
+                    (content, now, rkey),
+                )
+                if cur.rowcount == 0:
+                    await self._db.rollback()
+                    raise StoreNotFound(f"agent_document '{rkey}' not found")
+                await self._db.commit()
+            except StoreNotFound:
+                raise
+            except Exception:
                 await self._db.rollback()
-                raise StoreNotFound(f"agent_document '{rkey}' not found")
-            await self._db.commit()
-        except StoreNotFound:
-            raise
-        except Exception:
-            await self._db.rollback()
-            raise
+                raise
         return {"rkey": rkey, "content": content, "updatedAt": now}
 
     async def get(self, rkey: str) -> dict[str, Any]:
@@ -207,20 +285,21 @@ class DocumentStore:
         return out
 
     async def delete(self, rkey: str) -> None:
-        try:
-            await self._db.execute("BEGIN IMMEDIATE")
-            cur = await self._db.execute(
-                "DELETE FROM agent_documents WHERE rkey = ?", (rkey,)
-            )
-            if cur.rowcount == 0:
+        async with self._write_lock:
+            try:
+                await self._db.execute("BEGIN IMMEDIATE")
+                cur = await self._db.execute(
+                    "DELETE FROM agent_documents WHERE rkey = ?", (rkey,)
+                )
+                if cur.rowcount == 0:
+                    await self._db.rollback()
+                    raise StoreNotFound(f"agent_document '{rkey}' not found")
+                await self._db.commit()
+            except StoreNotFound:
+                raise
+            except Exception:
                 await self._db.rollback()
-                raise StoreNotFound(f"agent_document '{rkey}' not found")
-            await self._db.commit()
-        except StoreNotFound:
-            raise
-        except Exception:
-            await self._db.rollback()
-            raise
+                raise
 
 
 class RecordStore:
@@ -229,31 +308,33 @@ class RecordStore:
     Used for user tracking data.
     """
 
-    def __init__(self, db: aiosqlite.Connection) -> None:
+    def __init__(self, db: aiosqlite.Connection, write_lock: asyncio.Lock | None = None) -> None:
         self._db = db
+        self._write_lock = write_lock or asyncio.Lock()
 
     async def create(
         self, collection: str, rkey: str, record: dict[str, Any]
     ) -> dict[str, Any]:
         now = _now()
         payload = json.dumps(record)
-        try:
-            await self._db.execute("BEGIN IMMEDIATE")
-            await self._db.execute(
-                "INSERT INTO private_records "
-                "(collection, rkey, record, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (collection, rkey, payload, now, now),
-            )
-            await self._db.commit()
-        except aiosqlite.IntegrityError as e:
-            await self._db.rollback()
-            raise StoreConflict(
-                f"private_record '{collection}/{rkey}' already exists"
-            ) from e
-        except Exception:
-            await self._db.rollback()
-            raise
+        async with self._write_lock:
+            try:
+                await self._db.execute("BEGIN IMMEDIATE")
+                await self._db.execute(
+                    "INSERT INTO private_records "
+                    "(collection, rkey, record, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (collection, rkey, payload, now, now),
+                )
+                await self._db.commit()
+            except aiosqlite.IntegrityError as e:
+                await self._db.rollback()
+                raise StoreConflict(
+                    f"private_record '{collection}/{rkey}' already exists"
+                ) from e
+            except Exception:
+                await self._db.rollback()
+                raise
         return {"value": record}
 
     async def update(
@@ -261,22 +342,23 @@ class RecordStore:
     ) -> dict[str, Any]:
         now = _now()
         payload = json.dumps(record)
-        try:
-            await self._db.execute("BEGIN IMMEDIATE")
-            cur = await self._db.execute(
-                "UPDATE private_records SET record = ?, updated_at = ? "
-                "WHERE collection = ? AND rkey = ?",
-                (payload, now, collection, rkey),
-            )
-            if cur.rowcount == 0:
+        async with self._write_lock:
+            try:
+                await self._db.execute("BEGIN IMMEDIATE")
+                cur = await self._db.execute(
+                    "UPDATE private_records SET record = ?, updated_at = ? "
+                    "WHERE collection = ? AND rkey = ?",
+                    (payload, now, collection, rkey),
+                )
+                if cur.rowcount == 0:
+                    await self._db.rollback()
+                    raise StoreNotFound(f"private_record '{collection}/{rkey}' not found")
+                await self._db.commit()
+            except StoreNotFound:
+                raise
+            except Exception:
                 await self._db.rollback()
-                raise StoreNotFound(f"private_record '{collection}/{rkey}' not found")
-            await self._db.commit()
-        except StoreNotFound:
-            raise
-        except Exception:
-            await self._db.rollback()
-            raise
+                raise
         return {"value": record}
 
     async def get(self, collection: str, rkey: str) -> dict[str, Any]:
@@ -325,21 +407,22 @@ class RecordStore:
         return out
 
     async def delete(self, collection: str, rkey: str) -> None:
-        try:
-            await self._db.execute("BEGIN IMMEDIATE")
-            cur = await self._db.execute(
-                "DELETE FROM private_records WHERE collection = ? AND rkey = ?",
-                (collection, rkey),
-            )
-            if cur.rowcount == 0:
+        async with self._write_lock:
+            try:
+                await self._db.execute("BEGIN IMMEDIATE")
+                cur = await self._db.execute(
+                    "DELETE FROM private_records WHERE collection = ? AND rkey = ?",
+                    (collection, rkey),
+                )
+                if cur.rowcount == 0:
+                    await self._db.rollback()
+                    raise StoreNotFound(f"private_record '{collection}/{rkey}' not found")
+                await self._db.commit()
+            except StoreNotFound:
+                raise
+            except Exception:
                 await self._db.rollback()
-                raise StoreNotFound(f"private_record '{collection}/{rkey}' not found")
-            await self._db.commit()
-        except StoreNotFound:
-            raise
-        except Exception:
-            await self._db.rollback()
-            raise
+                raise
 
 
 class ChatStore:
@@ -348,8 +431,9 @@ class ChatStore:
     Used for persisted chat transcripts across conversations.
     """
 
-    def __init__(self, db: aiosqlite.Connection) -> None:
+    def __init__(self, db: aiosqlite.Connection, write_lock: asyncio.Lock | None = None) -> None:
         self._db = db
+        self._write_lock = write_lock or asyncio.Lock()
 
     async def create_session(
         self, title: str = "", rkey: str | None = None
@@ -357,16 +441,17 @@ class ChatStore:
         if rkey is None:
             rkey = _new_rkey()
         now = _now()
-        try:
-            await self._db.execute("BEGIN IMMEDIATE")
-            await self._db.execute(
-                "INSERT INTO chat_sessions (rkey, title, created_at) VALUES (?, ?, ?)",
-                (rkey, title, now),
-            )
-            await self._db.commit()
-        except Exception:
-            await self._db.rollback()
-            raise
+        async with self._write_lock:
+            try:
+                await self._db.execute("BEGIN IMMEDIATE")
+                await self._db.execute(
+                    "INSERT INTO chat_sessions (rkey, title, created_at) VALUES (?, ?, ?)",
+                    (rkey, title, now),
+                )
+                await self._db.commit()
+            except Exception:
+                await self._db.rollback()
+                raise
         return {"rkey": rkey, "title": title, "createdAt": now}
 
     async def get_session(self, rkey: str) -> dict[str, Any] | None:
@@ -381,33 +466,35 @@ class ChatStore:
 
     async def set_title(self, rkey: str, title: str) -> None:
         """Update a session's title."""
-        try:
-            await self._db.execute("BEGIN IMMEDIATE")
-            await self._db.execute(
-                "UPDATE chat_sessions SET title = ? WHERE rkey = ?",
-                (title, rkey),
-            )
-            await self._db.commit()
-        except Exception:
-            await self._db.rollback()
-            raise
+        async with self._write_lock:
+            try:
+                await self._db.execute("BEGIN IMMEDIATE")
+                await self._db.execute(
+                    "UPDATE chat_sessions SET title = ? WHERE rkey = ?",
+                    (title, rkey),
+                )
+                await self._db.commit()
+            except Exception:
+                await self._db.rollback()
+                raise
 
     async def ensure_session(
         self, rkey: str, title: str = ""
     ) -> dict[str, Any]:
         """Create a session with the given rkey if it doesn't exist; idempotent."""
         now = _now()
-        try:
-            await self._db.execute("BEGIN IMMEDIATE")
-            await self._db.execute(
-                "INSERT OR IGNORE INTO chat_sessions (rkey, title, created_at) "
-                "VALUES (?, ?, ?)",
-                (rkey, title, now),
-            )
-            await self._db.commit()
-        except Exception:
-            await self._db.rollback()
-            raise
+        async with self._write_lock:
+            try:
+                await self._db.execute("BEGIN IMMEDIATE")
+                await self._db.execute(
+                    "INSERT OR IGNORE INTO chat_sessions (rkey, title, created_at) "
+                    "VALUES (?, ?, ?)",
+                    (rkey, title, now),
+                )
+                await self._db.commit()
+            except Exception:
+                await self._db.rollback()
+                raise
         existing = await self.get_session(rkey)
         if existing is None:
             raise RuntimeError("ensure_session failed: session not found after create")
@@ -449,36 +536,38 @@ class ChatStore:
 
     async def delete_session(self, rkey: str) -> None:
         # cascade-deletes messages via FK
-        try:
-            await self._db.execute("BEGIN IMMEDIATE")
-            cur = await self._db.execute(
-                "DELETE FROM chat_sessions WHERE rkey = ?", (rkey,)
-            )
-            if cur.rowcount == 0:
+        async with self._write_lock:
+            try:
+                await self._db.execute("BEGIN IMMEDIATE")
+                cur = await self._db.execute(
+                    "DELETE FROM chat_sessions WHERE rkey = ?", (rkey,)
+                )
+                if cur.rowcount == 0:
+                    await self._db.rollback()
+                    raise StoreNotFound(f"chat_session '{rkey}' not found")
+                await self._db.commit()
+            except StoreNotFound:
+                raise
+            except Exception:
                 await self._db.rollback()
-                raise StoreNotFound(f"chat_session '{rkey}' not found")
-            await self._db.commit()
-        except StoreNotFound:
-            raise
-        except Exception:
-            await self._db.rollback()
-            raise
+                raise
 
     async def create_message(
         self, session_id: str, sender: str, content: str
     ) -> dict[str, Any]:
         now = _now()
-        try:
-            await self._db.execute("BEGIN IMMEDIATE")
-            cur = await self._db.execute(
-                "INSERT INTO chat_messages (session_id, sender, content, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (session_id, sender, content, now),
-            )
-            await self._db.commit()
-        except Exception:
-            await self._db.rollback()
-            raise
+        async with self._write_lock:
+            try:
+                await self._db.execute("BEGIN IMMEDIATE")
+                cur = await self._db.execute(
+                    "INSERT INTO chat_messages (session_id, sender, content, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (session_id, sender, content, now),
+                )
+                await self._db.commit()
+            except Exception:
+                await self._db.rollback()
+                raise
         return {
             "id": cur.lastrowid,
             "sessionId": session_id,

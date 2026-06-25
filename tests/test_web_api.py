@@ -77,6 +77,7 @@ def _make_stub_agent() -> Agent:
     agent._max_iterations = 30
     agent._sub_llm_client = None
     agent._compact_threshold_chars = 240_000
+    agent._memory_recall = None
     return agent
 
 

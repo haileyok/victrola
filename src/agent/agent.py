@@ -621,6 +621,7 @@ class Agent:
         self._sub_llm_client = sub_llm_client
         self._compact_threshold_chars = compact_threshold_chars
         self._umans_websearch_provider = umans_websearch_provider
+        self._memory_recall: Callable[[str], Awaitable[str | None]] | None = None
 
     # -- public read-only properties for web/Discord --
 
@@ -650,6 +651,14 @@ class Agent:
     def native_web_search_enabled(self) -> bool:
         """True when a server-side web search provider is active (Umans exa/native)."""
         return self._umans_websearch_provider in ("exa", "native")
+
+    @property
+    def memory_recall(self) -> Any:
+        return self._memory_recall
+
+    @memory_recall.setter
+    def memory_recall(self, value: Any) -> None:
+        self._memory_recall = value
 
     async def refresh_system_prompt(self) -> str:
         """Call the system prompt provider and update the cached prompt."""
@@ -964,6 +973,23 @@ class Agent:
                     exc_info=True,
                 )
 
+        # RAG memory recall — retrieve relevant episodic + factual memories
+        relevant_memories = ""
+        if self._memory_recall is not None:
+            try:
+                relevant_memories = await self._memory_recall(user_message) or ""
+            except Exception:
+                logger.warning("memory recall failed; continuing without RAG", exc_info=True)
+
+        if relevant_memories:
+            from src.agent.prompt import RELEVANT_MEMORIES_TEMPLATE
+
+            effective_system_prompt = (self._system_prompt or "") + RELEVANT_MEMORIES_TEMPLATE.format(
+                memories=relevant_memories
+            )
+        else:
+            effective_system_prompt = self._system_prompt or ""
+
         # compact the conversation if it's gotten huge
         try:
             await self._maybe_compact(conversation)
@@ -1003,7 +1029,7 @@ class Agent:
             await _emit(AgentEvent(kind="llm_start"))
             resp = await self._client.complete(
                 messages=conversation,
-                system=self._system_prompt,
+                system=effective_system_prompt,
                 tools=self._get_tools(),
             )
             if resp.usage:
@@ -1098,7 +1124,7 @@ class Agent:
         await _emit(AgentEvent(kind="llm_start"))
         resp = await self._client.complete(
             messages=conversation,
-            system=self._system_prompt,
+            system=effective_system_prompt,
             tools=None,  # no tools for final call
         )
         if resp.usage:

@@ -152,51 +152,44 @@ async def _load_system_prompt(
     operator_doc = ""
     skills = "No skills installed yet."
 
-    docs = tool_context._store.documents if tool_context._store else None
+    memory = tool_context._store.memory if tool_context._store else None
 
-    # load self-note
-    if docs is not None:
+    # load self entry
+    if memory is not None:
         try:
-            doc = await docs.get("self")
-            self_doc = doc.get("content", "")
+            entries = await memory.get_by_scope("self", "self")
+            if entries:
+                self_doc = entries[0].get("content", "")
             if self_doc:
-                logger.info("Loaded self-note (%d chars)", len(self_doc))
+                logger.info("Loaded self memory entry (%d chars)", len(self_doc))
             else:
-                logger.info("Self-note exists but is empty")
-        except Exception as e:
-            if "not found" in str(e).lower():
-                logger.info("No self-note found, using defaults")
-            else:
-                logger.warning("Failed to load self-note: %s", e)
+                logger.info("No self memory entry found, using defaults")
+        except Exception:
+            logger.warning("Failed to load self memory entry", exc_info=True)
 
-    # load operator-note
-    if docs is not None:
+    # load operator entries
+    if memory is not None:
         try:
-            doc = await docs.get("operator")
-            operator_doc = doc.get("content", "")
+            entries = await memory.get_by_scope("operator", "operator")
+            if entries:
+                operator_doc = "\n".join(e.get("content", "") for e in entries)
             if operator_doc:
-                logger.info("Loaded operator-note (%d chars)", len(operator_doc))
+                logger.info("Loaded operator memory (%d entries, %d chars)", len(entries), len(operator_doc))
             else:
-                logger.info("Operator-note exists but is empty")
-        except Exception as e:
-            if "not found" in str(e).lower():
-                logger.info("No operator-note found, using defaults")
-            else:
-                logger.warning("Failed to load operator-note: %s", e)
+                logger.info("No operator memory entries found, using defaults")
+        except Exception:
+            logger.warning("Failed to load operator memory entries", exc_info=True)
 
     # load skills list
-    if docs is not None:
+    if memory is not None:
         try:
-            resp = await docs.list(limit=100)
-            skill_lines = []
-            for doc in resp.get("documents", []):
-                rkey = doc.get("rkey", "")
-                if rkey.startswith("skill:"):
-                    name = rkey[6:]
-                    content = doc.get("content", "")
-                    preview = content[:80].replace("\n", " ")
+            skill_entries = await memory.list_skills()
+            if skill_entries:
+                skill_lines = []
+                for s in skill_entries:
+                    name = s.get("name", "")
+                    preview = s.get("preview", "")
                     skill_lines.append(f"- **{name}**: {preview}")
-            if skill_lines:
                 skills = "\n".join(skill_lines)
                 logger.info("Loaded %d skills", len(skill_lines))
         except Exception:
@@ -231,6 +224,40 @@ async def _load_system_prompt(
     )
 
 
+async def _init_memory(executor: ToolExecutor, agent: Agent) -> None:
+    """Initialize memory services after executor.initialize().
+
+    Runs migration, creates RecallService, and wires recall into the agent.
+    Must be called before the first system prompt load (which reads from
+    memory_entries).
+    """
+    # 1. Run migration (needs embedding client for backfill)
+    try:
+        from src.memory.migration import migrate_documents_to_memory, backfill_embeddings
+
+        migrated = await migrate_documents_to_memory(
+            executor.store, executor.ctx._embedding_client
+        )
+        if migrated > 0:
+            logger.info("Migrated %d documents to memory_entries", migrated)
+
+        # Backfill embeddings for entries that were migrated without Ollama
+        backfilled = await backfill_embeddings(
+            executor.store, executor.ctx._embedding_client
+        )
+        if backfilled > 0:
+            logger.info("Backfilled %d embeddings", backfilled)
+    except Exception:
+        logger.warning("Memory migration failed", exc_info=True)
+
+    # 2. Create recall service wrapping the existing SearchEngine
+    if executor.ctx._search_engine is not None:
+        from src.memory.recall import RecallService
+
+        recall_service = RecallService(search_engine=executor.ctx.search_engine)
+        agent.memory_recall = recall_service.recall
+
+
 @click.group()
 def cli():
     pass
@@ -255,6 +282,7 @@ def main(
         try:
             await executor.initialize()
             _wire_scheduler(executor, agent)
+            await _init_memory(executor, agent)
 
             async def _refresh_prompt() -> str:
                 return await _load_system_prompt(executor.ctx, executor, agent)
@@ -271,6 +299,7 @@ def main(
                     tg.create_task(discord_bot.start())
         finally:
             await agent.aclose()
+            await executor.aclose()
 
     try:
         asyncio.run(run())
@@ -296,6 +325,7 @@ def chat(
     async def run():
         try:
             await executor.initialize()
+            await _init_memory(executor, agent)
 
             async def _refresh_prompt() -> str:
                 return await _load_system_prompt(executor.ctx, executor, agent)
@@ -320,6 +350,7 @@ def chat(
                 print(f"\nAgent: {response}\n")
         finally:
             await agent.aclose()
+            await executor.aclose()
 
     try:
         asyncio.run(run())
@@ -346,6 +377,7 @@ def serve(
         try:
             await executor.initialize()
             _wire_scheduler(executor, agent)
+            await _init_memory(executor, agent)
 
             async def _refresh_prompt() -> str:
                 return await _load_system_prompt(executor.ctx, executor, agent)
@@ -391,6 +423,7 @@ def serve(
                 tg.create_task(_serve_and_stop())
         finally:
             await agent.aclose()
+            await executor.aclose()
 
     try:
         asyncio.run(run())

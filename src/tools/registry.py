@@ -41,6 +41,8 @@ class ToolContext:
         self._custom_tool_manager: Any | None = None
         self._secret_manager: Any | None = None
         self._scheduler: Any | None = None
+        self._embedding_client: Any | None = None
+        self._search_engine: Any | None = None
 
     @property
     def exa_client(self) -> Any:
@@ -77,6 +79,18 @@ class ToolContext:
     @property
     def scheduler(self) -> Any:
         return self._scheduler
+
+    @property
+    def embedding_client(self) -> Any:
+        if self._embedding_client is None:
+            raise RuntimeError("EmbeddingClient not configured")
+        return self._embedding_client
+
+    @property
+    def search_engine(self) -> Any:
+        if self._search_engine is None:
+            raise RuntimeError("SearchEngine not configured")
+        return self._search_engine
 
 
 class ToolRegistry:
