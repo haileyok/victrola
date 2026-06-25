@@ -1,9 +1,30 @@
 import logging
+import re
 from typing import Any
 
 from src.tools.registry import TOOL_REGISTRY, ToolContext, ToolParameter
 
 logger = logging.getLogger(__name__)
+
+# Valid rkey pattern: 1-512 chars, alphanumeric with -_.~:
+_RKEY_PATTERN = re.compile(r"^[A-Za-z0-9\-_.~:]{1,512}$")
+
+# Reserved prefix that collides with custom tool storage
+_RESERVED_RKEY_PREFIX = "customtool:"
+
+
+def _validate_rkey(rkey: str) -> str | None:
+    """Validate an rkey. Returns an error message string if invalid, None if valid."""
+    if not rkey:
+        return "Error: rkey is required"
+    if rkey.startswith(_RESERVED_RKEY_PREFIX):
+        return f"Error: rkey '{rkey}' uses reserved prefix 'customtool:' — choose a different name"
+    if not _RKEY_PATTERN.match(rkey):
+        return (
+            f"Error: rkey '{rkey}' contains invalid characters or is too long. "
+            "Allowed: alphanumeric, dash, underscore, dot, tilde, colon (1-512 chars)"
+        )
+    return None
 
 
 async def _get_note(ctx: ToolContext, rkey: str) -> dict[str, Any] | None:
@@ -73,6 +94,10 @@ async def note_upsert(
     if not content:
         return "Error: content is required"
 
+    rkey_error = _validate_rkey(rkey)
+    if rkey_error:
+        return rkey_error
+
     docs = ctx.store.documents
     assert docs is not None
 
@@ -133,6 +158,10 @@ async def note_get(ctx: ToolContext, rkeys: list[str]) -> str:
 
     parts: list[str] = []
     for rkey in rkeys:
+        rkey_error = _validate_rkey(rkey)
+        if rkey_error:
+            parts.append(f"Note '{rkey}': {rkey_error}")
+            continue
         doc = await _get_note(ctx, rkey)
         if doc is not None:
             parts.append(f"Note '{doc.get('rkey', rkey)}':\n\n{doc.get('content', '')}")
