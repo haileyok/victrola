@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -11,6 +12,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 TOOL_RKEY_PREFIX = "customtool:"
+
+# Valid tool name pattern: alphanumeric with -_. (no path separators, no colons)
+_TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9\-_.]{1,128}$")
 
 
 @dataclass
@@ -150,6 +154,12 @@ class CustomToolManager:
 
     async def create_tool(self, tool: CustomTool) -> str:
         """Create a new custom tool in the local store."""
+        if not _TOOL_NAME_PATTERN.match(tool.name):
+            return (
+                f"Error: tool name '{tool.name}' is invalid. "
+                "Allowed: alphanumeric, dash, underscore, dot (1-128 chars)"
+            )
+
         rkey = f"{TOOL_RKEY_PREFIX}{tool.name}"
         content = json.dumps(tool.to_dict())
         assert self._store.documents is not None
