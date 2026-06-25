@@ -604,19 +604,14 @@ class MCPManager:
             await self._persist_server(name)
 
             if needs_reconnect and was_connected:
-                # disconnect old connection under the current lock
+                # disconnect old connection, then reconnect under the same lock
                 if name in self._connections:
                     await self._disconnect_server_impl(name)
-            else:
-                needs_reconnect = False
-
-        # reconnect outside the lock (connect_server acquires it)
-        if needs_reconnect:
-            try:
-                await self.connect_server(name)
-            except Exception as e:
-                logger.warning("Failed to reconnect MCP server '%s': %s", name, e)
-                return f"MCP server '{name}' updated, but reconnection failed: {e}"
+                try:
+                    await self._connect_server_impl(name)
+                except Exception as e:
+                    logger.warning("Failed to reconnect MCP server '%s': %s", name, e)
+                    return f"MCP server '{name}' updated, but reconnection failed: {e}"
 
         return f"MCP server '{name}' updated."
 
@@ -630,6 +625,13 @@ class MCPManager:
             # disconnect (also unregisters tools)
             if name in self._connections:
                 await self._disconnect_server_impl(name)
+            else:
+                # even if not connected, unregister any approved tools
+                for tool in config.tools:
+                    if tool.approved:
+                        self._registry.unregister(
+                            f"{name}.{self._sanitize_tool_name(tool.name)}"
+                        )
 
             rkey = f"{MCP_RKEY_PREFIX}{name}"
             if self._store.documents is None:
@@ -682,7 +684,9 @@ class MCPManager:
     def _sanitize_tool_name(name: str) -> str:
         """Replace non-identifier characters with underscore, ensure valid start, avoid reserved words."""
         sanitized = _SANITIZE_PATTERN.sub("_", name)
-        if sanitized and not sanitized[0].isalpha() and sanitized[0] != "_":
+        if not sanitized:
+            sanitized = "_"
+        if not sanitized[0].isalpha() and sanitized[0] != "_":
             sanitized = "_" + sanitized
         if sanitized in _TS_RESERVED_WORDS:
             sanitized += "_"
