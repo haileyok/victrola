@@ -155,6 +155,18 @@ class ScheduleListScreen(Screen):
         if not scheduler or not name:
             return
 
+        from src.tui.screens.confirm import ConfirmScreen
+
+        def _on_confirm(confirmed: bool) -> None:
+            if confirmed:
+                self.run_worker(self._do_delete_schedule(name), exclusive=True)
+
+        self.app.push_screen(ConfirmScreen(f"Delete schedule '{name}'?"), _on_confirm)
+
+    async def _do_delete_schedule(self, name: str) -> None:
+        scheduler = self._get_scheduler()
+        if not scheduler:
+            return
         try:
             result = await scheduler.delete_task(name)
             self.notify(result)
@@ -245,9 +257,11 @@ class ScheduleInputScreen(Screen):
             self.notify(f"Invalid schedule: {e}", severity="error")
             return
 
-        self.app.pop_screen()
+        # Await _on_save BEFORE popping the screen so the save
+        # completes while the screen is still mounted.
         if self._on_save:
             await self._on_save(name, schedule, prompt)
+        self.app.pop_screen()
 
     def action_cancel(self) -> None:
         self.app.pop_screen()

@@ -104,6 +104,19 @@ class SecretListScreen(Screen):
         if not name:
             return
 
+        # Confirm before deleting
+        from src.tui.screens.confirm import ConfirmScreen
+
+        def _on_confirm(confirmed: bool) -> None:
+            if confirmed:
+                self.run_worker(self._do_delete_secret(name), exclusive=True)
+
+        self.app.push_screen(ConfirmScreen(f"Delete secret '{name}'?"), _on_confirm)
+
+    async def _do_delete_secret(self, name: str) -> None:
+        manager = self._get_manager()
+        if manager is None:
+            return
         try:
             result = await manager.delete_secret(name)
             self.notify(result)
@@ -170,9 +183,16 @@ class SecretInputScreen(Screen):
                 self.notify("Value is required", severity="error")
                 return
 
-            self.app.pop_screen()
+            # Clear the input values before popping so the secret
+            # is not left in widget memory.
+            name_input.value = ""
+            value_input.value = ""
+
+            # Await _on_save BEFORE popping the screen so the save
+            # completes while the screen is still mounted.
             if self._on_save:
                 await self._on_save(name, value)
+            self.app.pop_screen()
 
     def action_cancel(self) -> None:
         self.app.pop_screen()

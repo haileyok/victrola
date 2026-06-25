@@ -169,6 +169,21 @@ class ToolDetailScreen(Screen):
         manager = self._manager()
         if manager is None:
             return
+
+        from src.tui.screens.confirm import ConfirmScreen
+
+        def _on_confirm(confirmed: bool) -> None:
+            if confirmed:
+                self.run_worker(self._do_revoke(), exclusive=True)
+
+        self.app.push_screen(
+            ConfirmScreen(f"Revoke approval for '{self._tool_name}'?"), _on_confirm
+        )
+
+    async def _do_revoke(self) -> None:
+        manager = self._manager()
+        if manager is None:
+            return
         try:
             result = await manager.revoke_tool(self._tool_name)
             self.notify(result)
@@ -178,6 +193,21 @@ class ToolDetailScreen(Screen):
             self.notify("Failed to revoke tool", severity="error")
 
     async def action_delete(self) -> None:
+        manager = self._manager()
+        if manager is None:
+            return
+
+        from src.tui.screens.confirm import ConfirmScreen
+
+        def _on_confirm(confirmed: bool) -> None:
+            if confirmed:
+                self.run_worker(self._do_delete(), exclusive=True)
+
+        self.app.push_screen(
+            ConfirmScreen(f"Delete tool '{self._tool_name}'?"), _on_confirm
+        )
+
+    async def _do_delete(self) -> None:
         manager = self._manager()
         if manager is None:
             return

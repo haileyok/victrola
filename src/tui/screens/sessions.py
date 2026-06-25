@@ -154,6 +154,15 @@ class SessionListScreen(Screen):
         if not rkey:
             return
 
+        from src.tui.screens.confirm import ConfirmScreen
+
+        def _on_confirm(confirmed: bool) -> None:
+            if confirmed:
+                self.run_worker(self._do_delete_session(rkey), exclusive=True)
+
+        self.app.push_screen(ConfirmScreen(f"Delete session '{rkey}'?"), _on_confirm)
+
+    async def _do_delete_session(self, rkey: str) -> None:
         chat = self._chat_store()
         if chat is None:
             return
