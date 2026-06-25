@@ -9,6 +9,7 @@ import { SchedulesView } from "./components/schedules/SchedulesView";
 import { SystemPromptView } from "./components/system-prompt/SystemPromptView";
 import { MCPView } from "./components/mcp/MCPView";
 import { MCPServerDetail } from "./components/mcp/MCPServerDetail";
+import { MemoryView } from "./components/memory/MemoryView";
 
 export default function App() {
   return (
@@ -25,6 +26,7 @@ export default function App() {
           <Route path="/mcp" element={<MCPView />} />
           <Route path="/mcp/:name" element={<MCPServerDetail />} />
           <Route path="/system-prompt" element={<SystemPromptView />} />
+          <Route path="/memory" element={<MemoryView />} />
         </Route>
       </Routes>
     </BrowserRouter>

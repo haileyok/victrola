@@ -112,6 +112,10 @@ Before each turn, the user's message is embedded and relevant `episodic` + `fact
 
 Embeddings are generated via a local Ollama instance using `nomic-embed-text` (768 dimensions). If Ollama isn't running, memory writes store NULL embeddings and searches fall back to keyword-only. Embeddings are backfilled automatically when Ollama becomes available.
 
+### Web UI
+
+Memory entries can also be managed through the web interface at `/memory`, which provides browse, search, create, edit, and delete alongside the `memory.*` agent tools.
+
 ## Storage
 
 Everything persistent lives under `./data/`:

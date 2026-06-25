@@ -1,6 +1,9 @@
 import type {
   MCPServerDetail,
   MCPServerSummary,
+  MemoryEntry,
+  MemoryEntryList,
+  MemorySearchResponse,
   MessageList,
   Schedule,
   Secret,
@@ -218,6 +221,39 @@ export const api = {
   // -- system prompt --
 
   getSystemPrompt: () => fetchJSON<SystemPrompt>(`${API_BASE}/system-prompt`),
+
+  // -- memory --
+
+  listMemory: (type?: string, limit = 50, cursor?: number) =>
+    fetchJSON<MemoryEntryList>(
+      `${API_BASE}/memory?limit=${limit}${type ? `&type=${enc(type)}` : ""}${cursor ? `&cursor=${cursor}` : ""}`,
+    ),
+
+  getMemory: (id: number) => fetchJSON<MemoryEntry>(`${API_BASE}/memory/${id}`),
+
+  createMemory: (type: string, scope: string, content: string, tags?: string[]) =>
+    fetchJSON<MemoryEntry>(`${API_BASE}/memory`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type, scope, content, tags: tags || [] }),
+    }),
+
+  updateMemory: (id: number, content?: string, tags?: string[]) =>
+    fetchJSON<MemoryEntry>(`${API_BASE}/memory/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content, tags }),
+    }),
+
+  deleteMemory: (id: number) =>
+    fetchJSON<void>(`${API_BASE}/memory/${id}`, { method: "DELETE" }),
+
+  searchMemory: (query: string, type?: string, types?: string[], scope?: string, tags?: string[], limit = 20) =>
+    fetchJSON<MemorySearchResponse>(`${API_BASE}/memory/search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, type, types, scope, tags, limit }),
+    }),
 
   // -- MCP --
 

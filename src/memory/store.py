@@ -280,6 +280,45 @@ class MemoryStore:
             out["cursor"] = next_cursor
         return out
 
+    async def list_entries(
+        self, type: str | None = None, limit: int = 50, cursor: int | None = None
+    ) -> dict[str, Any]:
+        """Paginated list of entries, optionally filtered by type."""
+        limit = max(1, min(limit, 500))
+        if type is not None and type not in _VALID_TYPES:
+            raise ValueError(f"Invalid memory type '{type}'")
+
+        base_select = (
+            "SELECT id, type, scope, content, metadata, embedding, created_at, updated_at "
+            "FROM memory_entries"
+        )
+        if type:
+            if cursor:
+                sql = f"{base_select} WHERE type = ? AND id > ? ORDER BY id LIMIT ?"
+                params: tuple = (type, cursor, limit + 1)
+            else:
+                sql = f"{base_select} WHERE type = ? ORDER BY id LIMIT ?"
+                params = (type, limit + 1)
+        else:
+            if cursor:
+                sql = f"{base_select} WHERE id > ? ORDER BY id LIMIT ?"
+                params = (cursor, limit + 1)
+            else:
+                sql = f"{base_select} ORDER BY id LIMIT ?"
+                params = (limit + 1,)
+
+        cur = await self._db.execute(sql, params)
+        rows = await cur.fetchall()
+        next_cursor: int | None = None
+        if len(rows) > limit:
+            rows = rows[:limit]
+            next_cursor = rows[-1][0]
+        entries = [self._row_to_dict(r) for r in rows]
+        out: dict[str, Any] = {"entries": entries}
+        if next_cursor:
+            out["cursor"] = next_cursor
+        return out
+
     async def list_skills(self) -> list[dict[str, Any]]:
         """Return all skill entries with name + 80-char preview."""
         cur = await self._db.execute(
