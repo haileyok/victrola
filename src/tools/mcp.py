@@ -458,16 +458,15 @@ class MCPManager:
         for name, config in list(self._servers.items()):
             if not config.enabled:
                 continue
-            # Skip OAuth servers that haven't been authorized yet — they need
-            # manual authorization via the web UI (browser redirect flow)
+            # Skip OAuth servers — they need manual authorization via the web UI.
+            # Even if tokens are stored, they may be expired and the refresh flow
+            # can block for minutes waiting for a callback that won't come during startup.
             if config.auth_type == "oauth":
-                status = await self.get_oauth_status_async(name)
-                if status != "authorized":
-                    logger.info(
-                        "Skipping OAuth MCP server '%s' — not yet authorized "
-                        "(use the web UI to authorize)", name
-                    )
-                    continue
+                logger.info(
+                    "Skipping OAuth MCP server '%s' on startup — "
+                    "connect manually via the web UI", name
+                )
+                continue
             try:
                 await asyncio.wait_for(self.connect_server(name), timeout=_CONNECT_TIMEOUT)
             except (asyncio.TimeoutError, Exception) as e:
