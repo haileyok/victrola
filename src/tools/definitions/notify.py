@@ -116,11 +116,16 @@ async def signal(
 
     message = f"{title}\n\n{content}" if title else content
 
+    from urllib.parse import quote
+
+    bot_phone = quote(CONFIG.signal_bot_phone, safe="")
+    send_url = f"http://{CONFIG.signal_service}/v2/send/{bot_phone}"
+
     sent = 0
     for chunk in _chunk(message):
         try:
             resp = await ctx.http_client.post(
-                f"http://{CONFIG.signal_service}/v2/send/{CONFIG.signal_bot_phone}",
+                send_url,
                 json={
                     "message": chunk,
                     "recipients": [CONFIG.signal_operator_phone],

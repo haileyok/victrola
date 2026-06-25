@@ -22,6 +22,7 @@ import base64
 import json
 import logging
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 import httpx
 
@@ -70,6 +71,12 @@ class SignalBot:
     def _http_client(self) -> httpx.AsyncClient:
         return self._executor.ctx.http_client
 
+    def _send_url(self) -> str:
+        return f"{self._base_url}/v2/send/{quote(self._bot_phone, safe='')}"
+
+    def _receive_url(self) -> str:
+        return f"{self._base_url}/v1/receive/{quote(self._bot_phone, safe='')}"
+
     async def start(self) -> None:
         """Poll signal-cli-rest-api for incoming messages until close() is called."""
         logger.info(
@@ -99,7 +106,7 @@ class SignalBot:
         """
         try:
             resp = await self._http_client.get(
-                f"{self._base_url}/v1/receive/{self._bot_phone}",
+                self._receive_url(),
                 timeout=10.0,
             )
         except httpx.HTTPError as e:
@@ -110,7 +117,14 @@ class SignalBot:
             logger.warning("Signal receive returned HTTP %d", resp.status_code)
             return
 
-        messages = resp.json()
+        try:
+            messages = resp.json()
+        except (ValueError, TypeError) as e:
+            logger.error(
+                "Signal receive returned malformed JSON (messages may be lost): %s", e
+            )
+            return
+
         if not isinstance(messages, list):
             return
 
@@ -246,7 +260,7 @@ class SignalBot:
         for chunk in _chunk(text, limit=MAX_CHUNK):
             try:
                 resp = await self._http_client.post(
-                    f"{self._base_url}/v2/send/{self._bot_phone}",
+                    self._send_url(),
                     json={
                         "message": chunk,
                         "recipients": [self._operator_phone],

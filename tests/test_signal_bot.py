@@ -83,7 +83,7 @@ async def test_signal_message_handling(signal_bot):
     # Response should have been sent via Signal
     mock_http.post.assert_called()
     send_call = mock_http.post.call_args
-    assert "v2/send/+1111111111" in send_call.args[0]
+    assert "v2/send/%2B1111111111" in send_call.args[0]
     assert send_call.kwargs["json"]["message"] == "agent response"
     assert send_call.kwargs["json"]["recipients"] == ["+2222222222"]
 

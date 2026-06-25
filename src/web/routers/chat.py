@@ -85,7 +85,9 @@ async def chat(
             # 1. load full conversation history first — agent.chat() will
             # append the new user turn to this list in place
             try:
-                conversation, msg_ids = await conv_manager.load_session_with_ids(session_id)
+                conversation, msg_ids = await conv_manager.load_session_with_ids(
+                    session_id, drop_current_user_tail=False
+                )
             except Exception:
                 logger.exception("Failed to load session history")
                 conversation = []

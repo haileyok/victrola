@@ -264,3 +264,34 @@ async def test_load_session_delegates_to_with_ids(tmp_path):
     assert msgs_old == msgs_new
 
     await store.close()
+
+
+async def test_load_session_with_ids_no_drop_tail(tmp_path):
+    """drop_current_user_tail=False preserves a trailing user message."""
+    store = Store(path=tmp_path / "test.db")
+    await store.initialize()
+
+    session_id = "test-sess"
+    await store.chat.ensure_session(rkey=session_id, title="test")
+
+    # End on a user message (simulating an unanswered turn)
+    await store.chat.create_message(
+        session_id=session_id, sender="user",
+        content=json.dumps({"role": "user", "content": "unanswered question"}),
+    )
+
+    ctx = ToolContext(store=store)
+    conv_manager = ConversationManager(ctx=ctx, llm_client=None)
+
+    # With drop_current_user_tail=True (default), the user message is dropped
+    msgs_drop, _ = await conv_manager.load_session_with_ids(session_id)
+    assert len(msgs_drop) == 0
+
+    # With drop_current_user_tail=False, the user message is preserved
+    msgs_keep, _ = await conv_manager.load_session_with_ids(
+        session_id, drop_current_user_tail=False
+    )
+    assert len(msgs_keep) == 1
+    assert msgs_keep[0]["content"] == "unanswered question"
+
+    await store.close()

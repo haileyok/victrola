@@ -140,11 +140,15 @@ async def _send_default_notification(
         and CONFIG.signal_operator_phone
     ):
         from src.utils.text import _chunk
+        from urllib.parse import quote
+
+        bot_phone = quote(CONFIG.signal_bot_phone, safe="")
+        send_url = f"http://{CONFIG.signal_service}/v2/send/{bot_phone}"
 
         for chunk in _chunk(message):
             try:
                 resp = await executor.ctx.http_client.post(
-                    f"http://{CONFIG.signal_service}/v2/send/{CONFIG.signal_bot_phone}",
+                    send_url,
                     json={
                         "message": chunk,
                         "recipients": [CONFIG.signal_operator_phone],
@@ -203,9 +207,15 @@ def _build_discord_bot(executor: ToolExecutor, agent: Agent):
 
 
 def _build_signal_bot(executor: ToolExecutor, agent: Agent):
-    """Return a SignalBot if Signal is configured, else None."""
+    """Return a SignalBot if Signal is fully configured, else None."""
     if not CONFIG.signal_service or not CONFIG.signal_bot_phone:
         logger.info("Signal not configured — Signal bot not starting.")
+        return None
+    if not CONFIG.signal_operator_phone:
+        logger.warning(
+            "SIGNAL_OPERATOR_PHONE not set — Signal bot not starting. "
+            "The bot would poll destructively but ignore all messages."
+        )
         return None
     from src.signal_bot.bot import SignalBot
 

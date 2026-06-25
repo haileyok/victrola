@@ -47,7 +47,7 @@ async def test_notify_signal_sends_message():
 
         # Verify the URL and payload
         call_args = ctx.http_client.post.call_args
-        assert "v2/send/+1111111111" in call_args.args[0]
+        assert "v2/send/%2B1111111111" in call_args.args[0]
         payload = call_args.kwargs["json"]
         assert payload["message"] == "hello world"
         assert payload["recipients"] == ["+2222222222"]

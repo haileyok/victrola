@@ -663,26 +663,28 @@ class ChatStore:
         chat_messages for auditability but are skipped on load.
 
         The checkpoint only advances forward: the UPDATE has a monotonic
-        guard (`compacted_up_to_msg_id IS NULL OR < new value`) so a
-        regressed write is silently ignored, preventing duplicated context
-        on reload.
+        guard so a regressed write is ignored. The summary row is only
+        inserted when the UPDATE actually advances the checkpoint,
+        preventing stale summaries from becoming the effective checkpoint
+        via ``ORDER BY id DESC`` in get_compaction_checkpoint.
         """
         now = _now()
         async with self._write_lock:
             try:
                 await self._db.execute("BEGIN IMMEDIATE")
-                await self._db.execute(
-                    "INSERT INTO chat_compaction_summaries "
-                    "(session_id, summary, compacted_up_to_msg_id, created_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (session_id, summary, compacted_up_to_msg_id, now),
-                )
-                await self._db.execute(
+                cur = await self._db.execute(
                     "UPDATE chat_sessions SET compacted_up_to_msg_id = ? "
                     "WHERE rkey = ? "
                     "AND (compacted_up_to_msg_id IS NULL OR compacted_up_to_msg_id < ?)",
                     (compacted_up_to_msg_id, session_id, compacted_up_to_msg_id),
                 )
+                if cur.rowcount > 0:
+                    await self._db.execute(
+                        "INSERT INTO chat_compaction_summaries "
+                        "(session_id, summary, compacted_up_to_msg_id, created_at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (session_id, summary, compacted_up_to_msg_id, now),
+                    )
                 await self._db.commit()
             except Exception:
                 await self._db.rollback()

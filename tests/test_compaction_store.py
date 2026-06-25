@@ -195,3 +195,39 @@ async def test_existing_db_data_preserved_on_migration(tmp_path):
     assert row[0] is None
 
     await store2.close()
+
+
+async def test_stale_checkpoint_write_ignored(tmp_path):
+    """A regressed checkpoint write must not create a stale summary row."""
+    store = Store(path=tmp_path / "test.db")
+    await store.initialize()
+
+    session_id = "stale-test"
+    ids = await _seed_messages(store, session_id, 10)
+
+    # First checkpoint at message 7
+    await store.chat.set_compaction_checkpoint(
+        session_id, ids[6], "Summary up to 7"
+    )
+    cp1 = await store.chat.get_compaction_checkpoint(session_id)
+    assert cp1["compacted_up_to_msg_id"] == ids[6]
+
+    # Stale/regressed write at message 3 — should be ignored
+    await store.chat.set_compaction_checkpoint(
+        session_id, ids[2], "Stale summary up to 3"
+    )
+
+    # Checkpoint should still point to message 7
+    cp2 = await store.chat.get_compaction_checkpoint(session_id)
+    assert cp2["compacted_up_to_msg_id"] == ids[6]
+    assert cp2["summary"] == "Summary up to 7"
+
+    # Only one summary row should exist (the stale one was not inserted)
+    cur = await store._db.execute(
+        "SELECT COUNT(*) FROM chat_compaction_summaries WHERE session_id = ?",
+        (session_id,),
+    )
+    row = await cur.fetchone()
+    assert row[0] == 1
+
+    await store.close()

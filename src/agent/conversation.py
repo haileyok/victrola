@@ -51,7 +51,7 @@ class ConversationManager:
         return messages
 
     async def load_session_with_ids(
-        self, session_id: str
+        self, session_id: str, drop_current_user_tail: bool = True
     ) -> tuple[list[dict[str, Any]], list[int]]:
         """Load messages for a session with compaction checkpoint awareness.
 
@@ -62,6 +62,12 @@ class ConversationManager:
         When a checkpoint exists, only the latest summary + messages after the
         checkpoint are loaded — raw messages covered by the checkpoint are
         skipped (they remain in the database for auditability).
+
+        ``drop_current_user_tail``: when True (default, for save-before-load
+        surfaces like Discord/Signal), drops the trailing user message since
+        the caller just saved it and ``agent.chat()`` will re-append it.
+        Set to False for load-before-save surfaces (web router) where the
+        tail may be a legitimately unanswered user message from a prior turn.
         """
         if self._store.chat is None:
             raise RuntimeError("ChatStore is not initialized")
@@ -110,11 +116,11 @@ class ConversationManager:
                 break
 
         # Drop the most recent user message — agent.chat() will re-append it.
-        # For surfaces that save-before-load (DiscordBot, SignalBot), the
-        # just-saved user message is at the tail and is correctly dropped.
-        # For the web router (load-before-save), the tail is the previous
-        # assistant turn, so this is a no-op.
-        if messages and messages[-1].get("role") == "user":
+        # Only applies to save-before-load surfaces (Discord, Signal) where
+        # the just-saved user message is at the tail. For load-before-save
+        # surfaces (web router), the tail may be an unanswered user message
+        # from a prior turn that should stay in context.
+        if drop_current_user_tail and messages and messages[-1].get("role") == "user":
             messages = messages[:-1]
             msg_ids = msg_ids[:-1]
 
