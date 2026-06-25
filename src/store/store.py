@@ -119,6 +119,15 @@ class Store:
             CREATE INDEX IF NOT EXISTS chat_messages_by_session
                 ON chat_messages(session_id, id);
 
+            CREATE TABLE IF NOT EXISTS chat_compaction_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                compacted_up_to_msg_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES chat_sessions(rkey) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS memory_entries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 type TEXT NOT NULL,
@@ -183,6 +192,16 @@ class Store:
                 "FTS5 not available — falling back to LIKE keyword search: %s", e
             )
         await self._db.execute("PRAGMA foreign_keys=ON")
+
+        # Add compacted_up_to_msg_id column to chat_sessions if it doesn't
+        # exist (SQLite doesn't support ADD COLUMN IF NOT EXISTS). Existing
+        # rows get NULL, meaning "no compaction yet."
+        cur = await self._db.execute("PRAGMA table_info(chat_sessions)")
+        columns = [row[1] for row in await cur.fetchall()]
+        if "compacted_up_to_msg_id" not in columns:
+            await self._db.execute(
+                "ALTER TABLE chat_sessions ADD COLUMN compacted_up_to_msg_id INTEGER DEFAULT NULL"
+            )
 
 class DocumentStore:
     """Agent documents: flat rkey -> content.
@@ -577,14 +596,15 @@ class ChatStore:
         }
 
     async def list_messages(
-        self, session_id: str, limit: int = 10, cursor: str | None = None
+        self, session_id: str, limit: int = 10, cursor: str | None = None, after_id: int = 0
     ) -> dict[str, Any]:
         limit = max(1, min(limit, 500))
         cursor_id = int(cursor) if cursor else 0
+        min_id = max(cursor_id, after_id)
         cur = await self._db.execute(
             "SELECT id, sender, content, created_at FROM chat_messages "
             "WHERE session_id = ? AND id > ? ORDER BY id LIMIT ?",
-            (session_id, cursor_id, limit + 1),
+            (session_id, min_id, limit + 1),
         )
         rows = await cur.fetchall()
         next_cursor: str | None = None
@@ -604,3 +624,73 @@ class ChatStore:
         if next_cursor:
             out["cursor"] = next_cursor
         return out
+
+    async def get_compaction_checkpoint(self, session_id: str) -> dict[str, Any] | None:
+        """Return the latest compaction summary and checkpoint ID for a session.
+
+        Returns None when no compaction has been recorded yet. Selects the
+        summary row whose ``compacted_up_to_msg_id`` matches the session's
+        checkpoint column, rather than blindly trusting ``ORDER BY id DESC``,
+        to avoid pairing the checkpoint with a stale/wrong summary row.
+        """
+        cur = await self._db.execute(
+            "SELECT compacted_up_to_msg_id FROM chat_sessions WHERE rkey = ?",
+            (session_id,),
+        )
+        row = await cur.fetchone()
+        if not row or row[0] is None:
+            return None
+        checkpoint_id = row[0]
+        cur = await self._db.execute(
+            "SELECT summary, compacted_up_to_msg_id, created_at "
+            "FROM chat_compaction_summaries "
+            "WHERE session_id = ? AND compacted_up_to_msg_id = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (session_id, checkpoint_id),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return None
+        return {
+            "summary": row[0],
+            "compacted_up_to_msg_id": row[1],
+            "created_at": row[2],
+        }
+
+    async def set_compaction_checkpoint(
+        self, session_id: str, compacted_up_to_msg_id: int, summary: str
+    ) -> None:
+        """Persist a compaction summary and advance the session's checkpoint.
+
+        Inserts a new row in chat_compaction_summaries and updates the
+        compacted_up_to_msg_id column on chat_sessions in a single
+        transaction. Raw messages are not deleted — they remain in
+        chat_messages for auditability but are skipped on load.
+
+        The checkpoint only advances forward: the UPDATE has a monotonic
+        guard so a regressed write is ignored. The summary row is only
+        inserted when the UPDATE actually advances the checkpoint,
+        preventing stale summaries from becoming the effective checkpoint
+        via ``ORDER BY id DESC`` in get_compaction_checkpoint.
+        """
+        now = _now()
+        async with self._write_lock:
+            try:
+                await self._db.execute("BEGIN IMMEDIATE")
+                cur = await self._db.execute(
+                    "UPDATE chat_sessions SET compacted_up_to_msg_id = ? "
+                    "WHERE rkey = ? "
+                    "AND (compacted_up_to_msg_id IS NULL OR compacted_up_to_msg_id < ?)",
+                    (compacted_up_to_msg_id, session_id, compacted_up_to_msg_id),
+                )
+                if cur.rowcount > 0:
+                    await self._db.execute(
+                        "INSERT INTO chat_compaction_summaries "
+                        "(session_id, summary, compacted_up_to_msg_id, created_at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (session_id, summary, compacted_up_to_msg_id, now),
+                    )
+                await self._db.commit()
+            except Exception:
+                await self._db.rollback()
+                raise

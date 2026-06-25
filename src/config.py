@@ -43,6 +43,19 @@ class Config(BaseSettings):
     discord_chat_timeout_seconds: int = 300
     """timeout in seconds for agent.chat() calls from the Discord bot"""
 
+    # signal bot
+    signal_service: str = ""
+    """address of signal-cli-rest-api service (e.g. '127.0.0.1:8080')"""
+
+    signal_bot_phone: str = ""
+    """E.164 phone number of the bot's Signal account (e.g. '+1234567890')"""
+
+    signal_operator_phone: str = ""
+    """E.164 phone number of the operator's Signal account"""
+
+    signal_session_rkey: str = "signal-persistent"
+    """rkey for the persistent Signal chat session in ChatStore"""
+
     # exa web search
     exa_api_key: str = ""
     """api key for Exa web search"""

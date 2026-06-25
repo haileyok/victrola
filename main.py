@@ -110,9 +110,14 @@ def _wire_scheduler(executor: ToolExecutor, agent: Agent) -> None:
     if executor.scheduler is not None:
 
         async def on_schedule_fire(task_name: str, prompt: str) -> str:
-            return await agent.chat(
+            response = await agent.chat(
                 f"[Scheduled task: {task_name}] {prompt}", conversation=[]
             )
+            if response:
+                await _send_default_notification(
+                    executor, response, title=f"Scheduled: {task_name}"
+                )
+            return response
 
         executor.scheduler._on_fire = on_schedule_fire
 
@@ -133,6 +138,74 @@ def _wire_scheduler(executor: ToolExecutor, agent: Agent) -> None:
         executor.scheduler._condition_runner = run_condition
 
 
+async def _send_default_notification(
+    executor: ToolExecutor, content: str, title: str = ""
+) -> None:
+    """Send a notification to the default channel (Signal if configured, else Discord).
+
+    Uses executor.ctx.http_client for HTTP calls. Logs errors but does not
+    raise — scheduled task results should not crash the scheduler.
+    """
+    from src.config import CONFIG
+
+    message = f"{title}\n\n{content}" if title else content
+
+    if (
+        CONFIG.signal_service
+        and CONFIG.signal_bot_phone
+        and CONFIG.signal_operator_phone
+    ):
+        from src.utils.text import _chunk
+        from urllib.parse import quote
+
+        bot_phone = quote(CONFIG.signal_bot_phone, safe="")
+        send_url = f"http://{CONFIG.signal_service}/v2/send/{bot_phone}"
+
+        for chunk in _chunk(message):
+            try:
+                resp = await executor.ctx.http_client.post(
+                    send_url,
+                    json={
+                        "message": chunk,
+                        "recipients": [CONFIG.signal_operator_phone],
+                    },
+                )
+            except Exception:
+                logger.exception("Failed to send scheduled notification via Signal")
+                return
+            if resp.status_code >= 400:
+                logger.error(
+                    "Scheduled Signal notification failed: HTTP %d — %s",
+                    resp.status_code,
+                    resp.text[:200],
+                )
+                return
+    else:
+        # Discord fallback — read webhook from secrets, truncate at 2000 chars
+        sm = executor.secret_manager
+        webhook_url = sm.get_secret("DISCORD_WEBHOOK_URL") if sm else None
+        if not webhook_url:
+            logger.warning(
+                "No default notification channel configured — scheduler result not delivered"
+            )
+            return
+        try:
+            payload = (
+                {"embeds": [{"title": title[:256], "description": content[:2000]}]}
+                if title
+                else {"content": message[:2000]}
+            )
+            resp = await executor.ctx.http_client.post(webhook_url, json=payload)
+            if resp.status_code >= 400:
+                logger.error(
+                    "Scheduled Discord notification failed: HTTP %d — %s",
+                    resp.status_code,
+                    resp.text[:200],
+                )
+        except Exception:
+            logger.exception("Failed to send scheduled notification via Discord")
+
+
 def _build_discord_bot(executor: ToolExecutor, agent: Agent):
     """Return a DiscordBot if DISCORD_BOT_TOKEN is configured, else None."""
     sm = executor.secret_manager
@@ -150,6 +223,28 @@ def _build_discord_bot(executor: ToolExecutor, agent: Agent):
     return DiscordBot(
         token=token,
         channel_name=CONFIG.discord_sessions_channel,
+        agent=agent,
+        executor=executor,
+    )
+
+
+def _build_signal_bot(executor: ToolExecutor, agent: Agent):
+    """Return a SignalBot if Signal is fully configured, else None."""
+    if not CONFIG.signal_service or not CONFIG.signal_bot_phone:
+        logger.info("Signal not configured — Signal bot not starting.")
+        return None
+    if not CONFIG.signal_operator_phone:
+        logger.warning(
+            "SIGNAL_OPERATOR_PHONE not set — Signal bot not starting. "
+            "The bot would poll destructively but ignore all messages."
+        )
+        return None
+    from src.signal_bot.bot import SignalBot
+
+    return SignalBot(
+        signal_service=CONFIG.signal_service,
+        bot_phone=CONFIG.signal_bot_phone,
+        operator_phone=CONFIG.signal_operator_phone,
         agent=agent,
         executor=executor,
     )
@@ -301,12 +396,15 @@ def main(
             agent.system_prompt = await _refresh_prompt()
 
             discord_bot = _build_discord_bot(executor, agent)
+            signal_bot = _build_signal_bot(executor, agent)
 
             async with asyncio.TaskGroup() as tg:
                 if executor.scheduler:
                     tg.create_task(executor.scheduler.run())
                 if discord_bot is not None:
                     tg.create_task(discord_bot.start())
+                if signal_bot is not None:
+                    tg.create_task(signal_bot.start())
         finally:
             await agent.aclose()
             await executor.aclose()
@@ -402,6 +500,7 @@ def serve(
             )
 
             discord_bot = _build_discord_bot(executor, agent)
+            signal_bot = _build_signal_bot(executor, agent)
 
             from src.web.app import create_app
 
@@ -412,6 +511,8 @@ def serve(
                     tg.create_task(executor.scheduler.run())
                 if discord_bot is not None:
                     tg.create_task(discord_bot.start())
+                if signal_bot is not None:
+                    tg.create_task(signal_bot.start())
                 config = uvicorn.Config(
                     create_app(agent, executor, conversation_manager),
                     host=CONFIG.web_host,
@@ -429,6 +530,8 @@ def serve(
                             executor.scheduler.stop()
                         if discord_bot is not None:
                             await discord_bot.close()
+                        if signal_bot is not None:
+                            await signal_bot.close()
 
                 tg.create_task(_serve_and_stop())
         finally:

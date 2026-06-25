@@ -85,10 +85,13 @@ async def chat(
             # 1. load full conversation history first — agent.chat() will
             # append the new user turn to this list in place
             try:
-                conversation = await conv_manager.load_session(session_id)
+                conversation, msg_ids = await conv_manager.load_session_with_ids(
+                    session_id, drop_current_user_tail=False
+                )
             except Exception:
                 logger.exception("Failed to load session history")
                 conversation = []
+                msg_ids = []
 
             # 2. save the user message to the store
             try:
@@ -104,6 +107,19 @@ async def chat(
             async def on_event(event):
                 await queue.put({"kind": event.kind, "data": event.data})
 
+            # Persist compaction checkpoints so the summary is reused on
+            # reload instead of re-summarizing from scratch each turn.
+            async def on_compact(summary: str, split_idx: int) -> None:
+                if 0 < split_idx <= len(msg_ids):
+                    last_id = msg_ids[split_idx - 1]
+                    if last_id >= 0:
+                        try:
+                            await store.chat.set_compaction_checkpoint(
+                                session_id, last_id, summary
+                            )
+                        except Exception:
+                            logger.exception("Failed to persist compaction checkpoint")
+
             # 4. run agent.chat as a background task — agent.chat() appends
             # the user_message to the conversation list internally
             chat_task = asyncio.create_task(
@@ -111,6 +127,7 @@ async def chat(
                     user_text,
                     conversation=conversation,
                     on_event=on_event,
+                    on_compact=on_compact,
                     images=body.images,
                 )
             )

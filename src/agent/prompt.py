@@ -41,6 +41,7 @@ Every tool invocation goes through a real `execute_code` function call, every ti
 - Use markdown formatting for readability in your final text response
 - When presenting data, use tables or structured formats
 - Cite specific data points from your tool results
+- Use `notify.send` for notifications to the operator (routes to Signal if configured, else Discord)
 
 ## Memory Discipline
 
