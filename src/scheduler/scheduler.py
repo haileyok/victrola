@@ -24,6 +24,7 @@ class ScheduledTask:
 
     # computed at runtime, not persisted
     _config: ScheduleConfig | None = field(default=None, repr=False, compare=False)
+    _retry_count: int = field(default=0, repr=False, compare=False)
 
     @property
     def config(self) -> ScheduleConfig:
@@ -184,9 +185,9 @@ class Scheduler:
             if last.tzinfo is None:
                 last = last.replace(tzinfo=timezone.utc)
         else:
-            # never run, no last_run — initialize it to now and skip this tick
-            task.last_run = now.isoformat()
-            return False
+            # never run — last_run is initialized in create_task, but if
+            # we encounter a task without it, treat it as due now
+            return True
 
         next_run = task.config.next_run(last)
         return now >= next_run
@@ -194,10 +195,6 @@ class Scheduler:
     async def _fire(self, task: ScheduledTask, now: datetime) -> None:
         """Execute a scheduled task."""
         logger.info("Firing schedule '%s': %s", task.name, task.prompt[:100])
-
-        # update last_run immediately to prevent double-firing
-        task.last_run = now.isoformat()
-        self._save()
 
         if self._on_fire:
             try:
@@ -207,7 +204,30 @@ class Scheduler:
                     task.name,
                     (response[:200] if response else "(empty)"),
                 )
+                # Success — advance last_run and reset retry count
+                task.last_run = now.isoformat()
+                task._retry_count = 0
+                self._save()
             except Exception:
-                logger.exception("Schedule '%s' callback failed", task.name)
+                task._retry_count += 1
+                if task._retry_count >= 3:
+                    logger.warning(
+                        "Schedule '%s' failed %d consecutive times — "
+                        "advancing last_run to prevent infinite retries",
+                        task.name,
+                        task._retry_count,
+                    )
+                    task.last_run = now.isoformat()
+                    task._retry_count = 0
+                    self._save()
+                else:
+                    logger.exception(
+                        "Schedule '%s' callback failed (attempt %d/3) — "
+                        "will retry on next tick",
+                        task.name,
+                        task._retry_count,
+                    )
         else:
             logger.info("Schedule '%s' fired (no callback wired)", task.name)
+            task.last_run = now.isoformat()
+            self._save()
