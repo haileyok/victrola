@@ -91,11 +91,14 @@ class ToolExecutor:
         except Exception:
             logger.warning("Failed to initialize secrets", exc_info=True)
 
-        # initialize scheduler (local file storage)
+        # initialize scheduler (DocumentStore-backed)
         try:
             from src.scheduler.scheduler import Scheduler
 
-            self._scheduler = Scheduler(path=data_dir / "schedules.json")
+            self._scheduler = Scheduler(
+                store=store.documents,
+                legacy_path=data_dir / "schedules.json",
+            )
             await self._scheduler.load_tasks()
             self._ctx._scheduler = self._scheduler
         except Exception:
@@ -236,6 +239,49 @@ const params = {params_json};
         finally:
             os.unlink(temp_path)
 
+    async def execute_condition_code(
+        self,
+        code: str,
+        env: dict[str, str] | None = None,
+        allow_net: bool = False,
+    ) -> dict[str, Any]:
+        """Execute trigger condition TypeScript code WITHOUT the tools bridge.
+
+        Condition scripts only have access to ``output()`` and ``debug()`` —
+        no backend tools. This prevents a condition predicate from performing
+        side effects via the tool registry.
+        """
+
+        if len(code) > MAX_CODE_SIZE:
+            return {
+                "success": False,
+                "error": f"code too large ({len(code)} chars, max {MAX_CODE_SIZE})",
+                "debug": [],
+            }
+
+        full_code = f"""
+import {{ output, debug }} from "./runtime.ts";
+
+// --- condition code ---
+{code}
+"""
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".ts", delete=False, dir=DENO_DIR
+        ) as f:
+            f.write(full_code)
+            temp_path = f.name
+
+        try:
+            return await self._run_deno_with_permissions(
+                temp_path,
+                allow_net=allow_net,
+                env=env or {},
+                allow_tool_calls=False,
+            )
+        finally:
+            os.unlink(temp_path)
+
     def _write_generated_tools(self) -> None:
         """generate tool stubs and write them to the deno directory"""
 
@@ -284,6 +330,7 @@ const params = {params_json};
         script_path: str,
         allow_net: bool = False,
         env: dict[str, str] | None = None,
+        allow_tool_calls: bool = True,
     ) -> dict[str, Any]:
         """Run deno with configurable permissions for custom tools."""
 
@@ -301,7 +348,12 @@ const params = {params_json};
         ]
 
         if allow_net:
+            # Allow outbound fetch() but NOT remote module loading —
+            # approved code is reviewed as-is, and remote imports could
+            # change behavior after approval.
             args.append("--allow-net")
+            args.append("--no-remote")
+            args.append("--no-npm")
         else:
             args.append("--deny-net")
             args.append("--no-remote")
@@ -335,12 +387,19 @@ const params = {params_json};
             env=proc_env,
         )
 
-        return await self._process_deno_output(process)
+        return await self._process_deno_output(process, allow_tool_calls=allow_tool_calls)
 
     async def _process_deno_output(
-        self, process: asyncio.subprocess.Process
+        self, process: asyncio.subprocess.Process, allow_tool_calls: bool = True
     ) -> dict[str, Any]:
-        """Shared logic for processing deno subprocess output."""
+        """Shared logic for processing deno subprocess output.
+
+        When ``allow_tool_calls`` is False, any ``__tool_call__`` message on
+        stdout is treated as an error — the process is killed and the result
+        is marked as failed. This prevents code that shouldn't have tool
+        access (e.g. trigger condition scripts) from forging tool-call
+        protocol messages to invoke backend tools.
+        """
 
         if process.stdin is None:
             raise RuntimeError("Process stdin is not available")
@@ -403,6 +462,11 @@ const params = {params_json};
                 # whenever we encounter a tool call, we then need to execute that tool and give
                 # it the response
                 if "__tool_call__" in message:
+                    if not allow_tool_calls:
+                        self._kill_process(process)
+                        error = "tool calls are not allowed in this execution mode"
+                        break
+
                     tool_call_count += 1
                     if tool_call_count > MAX_TOOL_CALLS:
                         self._kill_process(process)

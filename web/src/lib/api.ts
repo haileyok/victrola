@@ -142,11 +142,25 @@ export const api = {
   // -- schedules --
 
   listSchedules: () => fetchJSON<Schedule[]>(`${API_BASE}/schedules`),
-  createSchedule: (name: string, schedule: string, prompt: string) =>
+  createSchedule: (
+    name: string,
+    schedule: string,
+    prompt: string,
+    condition_code?: string,
+    requires_net?: boolean,
+    secrets?: string[],
+  ) =>
     fetchJSON<Schedule>(`${API_BASE}/schedules`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, schedule, prompt }),
+      body: JSON.stringify({
+        name,
+        schedule,
+        prompt,
+        condition_code: condition_code || null,
+        requires_net: requires_net || false,
+        secrets: secrets || [],
+      }),
     }),
   enableSchedule: (name: string) =>
     fetchJSON<Schedule>(`${API_BASE}/schedules/${enc(name)}/enable`, {
@@ -158,6 +172,26 @@ export const api = {
     }),
   deleteSchedule: (name: string) =>
     fetchJSON<void>(`${API_BASE}/schedules/${enc(name)}`, { method: "DELETE" }),
+  approveSchedule: (name: string) =>
+    fetchJSON<Schedule>(`${API_BASE}/schedules/${enc(name)}/approve`, {
+      method: "POST",
+    }),
+  revokeSchedule: (name: string) =>
+    fetchJSON<Schedule>(`${API_BASE}/schedules/${enc(name)}/revoke`, {
+      method: "POST",
+    }),
+  testSchedule: (name: string) =>
+    fetchJSON<Record<string, unknown>>(`${API_BASE}/schedules/${enc(name)}/test`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    }),
+  testTool: (name: string, params: Record<string, unknown> = {}) =>
+    fetchJSON<Record<string, unknown>>(`${API_BASE}/tools/${enc(name)}/test`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ params }),
+    }),
 
   // -- system prompt --
 

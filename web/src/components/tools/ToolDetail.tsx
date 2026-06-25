@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, Check, X, Trash2 } from "lucide-react";
+import { ArrowLeft, Check, X, Trash2, FlaskConical } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import type { ToolDetail as ToolDetailType } from "@/lib/types";
 import { Button } from "@/components/ui/button";
@@ -96,6 +96,23 @@ export function ToolDetail() {
     }
   };
 
+  const [testResult, setTestResult] = useState<Record<string, unknown> | null>(null);
+  const [testing, setTesting] = useState(false);
+
+  const handleTest = async () => {
+    if (!name) return;
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const result = await api.testTool(name);
+      setTestResult(result);
+    } catch (e) {
+      setTestResult({ error: e instanceof Error ? e.message : "Test failed" });
+    } finally {
+      setTesting(false);
+    }
+  };
+
   if (loading) return <div className="p-6 text-muted-foreground">Loading…</div>;
   if (!tool) return <div className="p-6 text-muted-foreground">Tool not found.</div>;
 
@@ -122,6 +139,9 @@ export function ToolDetail() {
               <X className="mr-1 h-4 w-4" /> Revoke
             </Button>
           )}
+          <Button size="sm" variant="outline" onClick={handleTest} disabled={testing}>
+            <FlaskConical className="mr-1 h-4 w-4" /> Test
+          </Button>
           <Button size="sm" variant="destructive" onClick={handleDelete}>
             <Trash2 className="mr-1 h-4 w-4" /> Delete
           </Button>
@@ -170,6 +190,15 @@ export function ToolDetail() {
             <code>{tool.code}</code>
           </pre>
         </div>
+
+        {testResult !== null && (
+          <div>
+            <div className="mb-1 text-xs font-medium text-muted-foreground">Test Result</div>
+            <pre className="overflow-x-auto rounded-md bg-zinc-900 p-3 text-xs text-zinc-100">
+              <code>{JSON.stringify(testResult, null, 2)}</code>
+            </pre>
+          </div>
+        )}
       </div>
 
       {/* Missing secret dialog */}

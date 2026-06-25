@@ -36,7 +36,7 @@ async def _build_full_executor(tmp_path: Path) -> ToolExecutor:
     ctx._secret_manager = sm
 
     # attach scheduler
-    scheduler = Scheduler(path=tmp_path / "schedules.json")
+    scheduler = Scheduler(store=store.documents)
     await scheduler.load_tasks()
     executor._scheduler = scheduler
     ctx._scheduler = scheduler

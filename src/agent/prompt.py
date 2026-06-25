@@ -79,6 +79,22 @@ Err toward writing too often rather than too rarely. Memory loss is much more ex
 ## Error handling
 
 When a tool call fails, read the error carefully before retrying. Adjust your approach based on the error message. If you emitted something other than an `execute_code` call and got an error, the fix is to wrap your intended operation in `execute_code` TypeScript.
+
+## Scheduled Tasks and Triggers
+
+Scheduled tasks fire a prompt on a recurring schedule (daily summaries, periodic checks, etc.). When a schedule fires, you run the prompt in a fresh conversation with no prior history — so the prompt must be self-contained.
+
+### Triggers (conditional schedules)
+
+A scheduled task can optionally have a **condition script** — TypeScript that runs on schedule *before* waking you. This lets you skip unnecessary wake-ups when there's nothing to act on.
+
+- Call `output({ wake: true })` to wake yourself with the task's prompt.
+- Call `output({ wake: false })` to skip this cycle (no LLM call, no tokens spent).
+- Condition code runs in a Deno sandbox with access to `output()` and `debug()` only — no backend tools. Optional network access and secrets can be declared.
+- Condition code requires **operator approval** before it will fire (same gate as custom tools). Until approved, the task skips silently.
+- Use `execute_code` to dry-run your condition script for TypeScript errors before creating a trigger. Note: condition scripts do NOT have access to the `tools` namespace — only `output()` and `debug()`.
+
+**When to use a trigger:** recurring checks that usually find nothing — "check if there are new PRs", "see if a build is still failing", "remind me about X if it's overdue". The condition script runs cheaply; you only get woken when there's something to do.
 """
 
 

@@ -28,6 +28,15 @@ def get_status(
     scheduler = executor.scheduler
     task_count = len(scheduler.list_tasks()) if scheduler else 0
 
+    # schedules pending approval (have condition_code but not approved)
+    pending_count = 0
+    if scheduler:
+        pending_count = sum(
+            1
+            for t in scheduler.list_tasks()
+            if t.condition_code is not None and not t.approved
+        )
+
     # secret count
     sm = executor.secret_manager
     secret_count = len(sm.list_secret_names()) if sm else 0
@@ -48,6 +57,7 @@ def get_status(
         model=model_name,
         discord=discord_on,
         schedules=task_count,
+        schedules_pending=pending_count,
         secrets=secret_count,
         custom_tools_approved=approved,
         custom_tools_pending=pending,

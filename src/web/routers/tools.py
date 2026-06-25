@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from src.tools.executor import ToolExecutor
 from src.web.dependencies import get_executor
-from src.web.schemas import ToolDetailResponse, ToolSummary
+from src.web.schemas import TestCodeRequest, ToolDetailResponse, ToolSummary
 
 router = APIRouter()
 
@@ -121,3 +121,31 @@ async def delete_tool(
     if tool is None:
         raise HTTPException(404, f"Tool '{name}' not found")
     await mgr.delete_tool(name)
+
+
+@router.post("/tools/{name}/test")
+async def test_tool(
+    name: str,
+    body: TestCodeRequest,
+    executor: ToolExecutor = Depends(get_executor),
+) -> dict[str, Any]:
+    mgr = _get_manager(executor)
+    tool = mgr.get_tool(name)
+    if tool is None:
+        raise HTTPException(404, f"Tool '{name}' not found")
+
+    # Build env from secrets
+    env: dict[str, str] = {}
+    sm = _get_sm(executor)
+    for secret_name in tool.secrets:
+        val = sm.get_secret(secret_name)
+        if val:
+            env[secret_name.upper()] = val
+
+    result = await executor.execute_custom_tool_code(
+        code=tool.code,
+        params=body.params or {},
+        env=env,
+        allow_net=tool.requires_net,
+    )
+    return result

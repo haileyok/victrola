@@ -23,7 +23,7 @@ Deno runs with the bare minimum of permissions: no filesystem writes, no network
 | Namespace | Tool | What it does |
 |-----------|------|---|
 | `memory` | `add`, `update`, `delete`, `search`, `get`, `list_skills`, `get_skill` | Entry-based memory with hybrid search. `self` holds the agent's personality; `operator` holds facts about you; `skill:*` holds reusable procedures; `episodic` and `factual` are RAG-retrieved per turn. |
-| `scheduler` | `list_schedules`, `get_schedule` | View scheduled tasks. Creation is via the web interface. |
+| `scheduler` | `list_schedules`, `get_schedule` | View scheduled tasks. Creation is via the web interface or `scheduler.create_schedule`. |
 | `notify` | `discord` | Send a message to Discord via webhook (requires `DISCORD_WEBHOOK_URL` secret). |
 | `summarize` | `summarize` | Summarize text using the sub-agent model. |
 | `web` | search tools via [Exa](https://exa.ai) (requires `EXA_API_KEY`). |
@@ -66,6 +66,26 @@ The agent can propose new tools by calling `custom_tools.create_custom_tool` dur
 
 If a tool references a secret that isn't configured yet, the approval flow walks you through setting each missing secret before completing approval.
 
+## Scheduling and Triggers
+
+Scheduled tasks fire a prompt on a recurring schedule (hourly, daily, weekly, cron). When a schedule fires, the agent runs the prompt in a fresh conversation with full tool access. Tasks are stored in SQLite (`store.db`).
+
+### Triggers (conditional schedules)
+
+A scheduled task can optionally have a **condition script** — TypeScript that runs on schedule *before* waking the agent. This avoids spending tokens on recurring checks that usually find nothing to act on.
+
+- The condition script calls `output({ wake: true })` to wake the agent, or `output({ wake: false })` to skip this cycle.
+- Condition code runs in the same Deno sandbox as custom tools, with optional network access and secrets.
+- Condition code requires **operator approval** before it will fire (same gate as custom tools). Until approved, the task skips silently.
+- If a condition script fails 3 consecutive times, the task is auto-disabled.
+- The operator can test condition code via the web interface before approving.
+
+Tasks without a condition script behave exactly as before — they always wake the agent on schedule.
+
+### One-time migration
+
+On startup, existing `schedules.json` entries are migrated to SQLite and the file is renamed to `schedules.json.migrated`. This is idempotent — re-running with a stale JSON file does not error or duplicate.
+
 ## Memory
 
 The agent has an entry-based memory system with hybrid search and RAG recall. All memory lives in SQLite (`memory_entries` table).
@@ -95,9 +115,9 @@ Embeddings are generated via a local Ollama instance using `nomic-embed-text` (7
 ## Storage
 
 Everything persistent lives under `./data/`:
-- `store.db` — SQLite: memory entries (+ FTS5 index + embeddings), chat sessions + messages, custom tool definitions, namespaced records
+- `store.db` — SQLite: memory entries (+ FTS5 index + embeddings), chat sessions + messages, custom tool definitions, scheduled tasks, namespaced records
 - `secrets.json` — named secrets (injected as env vars into custom tool Deno processes)
-- `schedules.json` — scheduled prompts
+- `schedules.json.migrated` — renamed after one-time migration to SQLite (kept as backup)
 
 Nothing leaves this directory unless you wire a tool to send it somewhere.
 

@@ -8,10 +8,21 @@ from src.scheduler.scheduler import Scheduler, ScheduledTask
 
 
 @pytest.fixture
-def scheduler(tmp_path):
-    """Create a scheduler with a temp path."""
-    s = Scheduler(path=tmp_path / "schedules.json")
+async def scheduler_with_store(tmp_path):
+    """Create a scheduler backed by a real DocumentStore."""
+    from src.store.store import Store
+
+    store = Store(path=tmp_path / "test.db")
+    await store.initialize()
+    s = Scheduler(store=store.documents)
     s._on_fire = AsyncMock(return_value="ok")
+    yield s, store
+    await store.close()
+
+
+@pytest.fixture
+async def scheduler(scheduler_with_store):
+    s, _store = scheduler_with_store
     return s
 
 
@@ -79,7 +90,7 @@ async def test_retry_count_resets_on_success(scheduler):
 
 def test_is_due_no_write_side_effect():
     """_is_due should not modify task.last_run when it's None."""
-    scheduler = Scheduler(path=MagicMock())
+    scheduler = Scheduler(store=MagicMock())
     task = ScheduledTask(name="test", schedule="interval:1h", prompt="hello")
     task.last_run = None  # never run
 
