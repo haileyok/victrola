@@ -19,6 +19,7 @@ def test_executor_has_public_properties():
     assert hasattr(executor, "http_client")
     assert hasattr(executor, "llm_client")
     assert hasattr(executor, "exa_client")
+    assert hasattr(executor, "ctx")
 
 
 def test_agent_has_public_properties():
@@ -33,18 +34,16 @@ def test_agent_has_public_properties():
     assert hasattr(agent, "refresh_system_prompt")
 
 
-def test_no_private_access_in_tui():
-    """No TUI screen should access underscore-prefixed executor attributes.
-    Note: agent._chat_lock and agent._conversation are removed by PR 1, not PR 19.
-    PR 19 handles executor/agent private attrs like _ctx, _secret_manager, etc."""
+def test_no_private_access_in_web():
+    """No web module should access underscore-prefixed executor/agent attributes."""
     result = subprocess.run(
         ["grep", "-rn", r"executor\._ctx\._\|executor\._secret_manager\|executor\._scheduler\b\|executor\._custom_tool_manager\|agent\._system_prompt\b\|agent\._system_prompt_provider\|agent\._client\b",
-         "src/tui/"],
+         "src/web/"],
         capture_output=True,
         text=True,
     )
     violations = [line for line in result.stdout.strip().split("\n") if line]
-    assert not violations, f"Found private attribute access in TUI:\n{result.stdout}"
+    assert not violations, f"Found private attribute access in web:\n{result.stdout}"
 
 
 def test_no_private_access_in_discord():
@@ -67,9 +66,5 @@ def test_no_private_access_in_main_py():
         capture_output=True,
         text=True,
     )
-    # Filter out _load_system_prompt which takes executor._ctx as a param (still needed)
-    violations = [
-        line for line in result.stdout.strip().split("\n")
-        if line and "_load_system_prompt" not in line
-    ]
+    violations = [line for line in result.stdout.strip().split("\n") if line]
     assert not violations, f"Found private attribute access in main.py:\n{result.stdout}"

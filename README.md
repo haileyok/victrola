@@ -5,7 +5,7 @@
 >
 > You are also trusting [the Deno sandbox](https://docs.deno.com/runtime/fundamentals/security/). For a truly hardened setup, you should absolutely be executing code in something like Firecracker VMs, not Deno alone.
 
-A general-purpose personal AI agent harness. You chat with it through a TUI or through Discord. It writes and runs code to do tasks for you!
+A general-purpose personal AI agent harness. You chat with it through a local web interface or through Discord. It writes and runs code to do tasks for you!
 
 Victrola is a single-operator agent runtime. You (the operator) drive it through chat. The agent has persistent memory, a scheduler, and can write its own tools in TypeScript that run in a sandboxed Deno process. You can also pre-write your own tools in Python using a decorator.
 
@@ -23,7 +23,7 @@ Deno runs with the bare minimum of permissions: no filesystem writes, no network
 | Namespace | Tool | What it does |
 |-----------|------|---|
 | `notes` | `note_upsert`, `note_get`, `note_list` | Persistent memory. `self` note holds the agent's personality; `operator` note holds what it knows about you; `skill:*` holds reusable procedures. |
-| `scheduler` | `list_schedules`, `get_schedule` | View scheduled tasks. Creation is via the TUI. |
+| `scheduler` | `list_schedules`, `get_schedule` | View scheduled tasks. Creation is via the web interface. |
 | `notify` | `discord` | Send a message to Discord via webhook (requires `DISCORD_WEBHOOK_URL` secret). |
 | `summarize` | `summarize` | Summarize text using the sub-agent model. |
 | `web` | search tools via [Exa](https://exa.ai) (requires `EXA_API_KEY`). |
@@ -58,12 +58,11 @@ The harness will generate a TypeScript stub and add the tool to the agent's syst
 
 ## Agent-written custom tools
 
-The agent can propose new tools by calling `custom_tools.create_custom_tool` during a chat turn. These are stored as pending and **do not appear in the agent's tool list until you approve them.** Tools can be reviewed via the TUI:
+The agent can propose new tools by calling `custom_tools.create_custom_tool` during a chat turn. These are stored as pending and **do not appear in the agent's tool list until you approve them.** Tools can be reviewed via the web interface:
 
-- From a chat session, press `T` if there's a pending-tools banner.
-- From the session list, press `t`.
-- Select a tool and press Enter to view its code + requested secrets.
-- `a` to approve, `r` to revoke, `d` to delete.
+- Navigate to the Tools page from the sidebar.
+- Click a tool to view its code, parameters, and requested secrets.
+- Approve, revoke, or delete from the detail view.
 
 If a tool references a secret that isn't configured yet, the approval flow walks you through setting each missing secret before completing approval.
 
@@ -119,20 +118,34 @@ SUB_MODEL_NAME=claude-haiku-4-5-20251001
 ## Usage
 
 ```bash
-uv run python main.py tui
-uv run python main.py main  # headless; runs the scheduler + Discord bot only
+uv run python main.py serve  # web interface at http://localhost:8000
+uv run python main.py main   # headless; runs the scheduler + Discord bot only
 ```
 
 All commands accept `--model-api`, `--model-name`, `--model-api-key`, `--model-endpoint` to override config at launch.
 
+### Development
+
+For frontend development, run the backend and Vite dev server simultaneously:
+
+```bash
+# terminal 1 — backend
+uv run python main.py serve
+
+# terminal 2 — frontend dev server (hot reload, proxies /api to :8000)
+cd web && npm run dev
+```
+
+The Vite dev server runs at `http://localhost:5173` with API requests proxied to the backend on port 8000. For production, build the frontend (`cd web && npm run build`) and it will be served directly by FastAPI at `http://localhost:8000`.
+
 ## Discord chat (optional)
 
-You can chat with the agent from Discord in addition to the TUI. Each thread in a dedicated channel is a chat session.
+You can chat with the agent from Discord in addition to the web interface. Each thread in a dedicated channel is a chat session.
 
 **Setup (one-time):**
 
 1. [discord.com/developers/applications](https://discord.com/developers/applications) → New Application → "Victrola"
-2. **Bot tab** → Reset Token → copy (save as `DISCORD_BOT_TOKEN` secret in the TUI)
+2. **Bot tab** → Reset Token → copy (save as `DISCORD_BOT_TOKEN` secret in the web interface)
 3. **Bot tab → Privileged Gateway Intents** → enable **"Message Content Intent"** (required — otherwise the bot can't read message text)
 4. **OAuth2 → URL Generator:**
    - Scopes: `bot`
@@ -149,6 +162,6 @@ You can chat with the agent from Discord in addition to the TUI. Each thread in 
 - Post a top-level message in the channel → the bot creates a thread *from* that message and the agent responds inside.
 - Or create a thread yourself (with any first message) → the agent responds in the thread.
 - Reply in an existing thread to continue that session.
-- Only the agent's final text response appears in the thread. Tool activity (TypeScript the agent writes + tool results) is hidden from Discord to keep threads readable — use the TUI if you want to review that.
+- Only the agent's final text response appears in the thread. Tool activity (TypeScript the agent writes + tool results) is hidden from Discord to keep threads readable — use the web interface if you want to review that.
 
-The bot only starts when `DISCORD_BOT_TOKEN` is configured. Without it the TUI and scheduler still run normally.
+The bot only starts when `DISCORD_BOT_TOKEN` is configured. Without it the web interface and scheduler still run normally.

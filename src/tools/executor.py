@@ -31,7 +31,7 @@ class ToolExecutor:
         self._secret_manager: Any | None = None
         self._scheduler: Any | None = None
 
-    # -- public read-only properties for TUI/Discord/main.py --
+    # -- public read-only properties for web/Discord/main.py --
 
     @property
     def store(self) -> Any:
@@ -60,6 +60,10 @@ class ToolExecutor:
     @property
     def exa_client(self) -> Any:
         return self._ctx._exa_client
+
+    @property
+    def ctx(self) -> ToolContext:
+        return self._ctx
 
     async def initialize(self) -> None:
         from src.config import CONFIG
