@@ -169,7 +169,7 @@ class ToolRegistry:
             lines.append(f"## {namespace}\n")
             for tool in sorted(tools, key=lambda t: t.name):
                 lines.append(f"### {tool.name}")
-                lines.append(f"{tool.description}\n")
+                lines.append(f"{self._sanitize_md(tool.description)}\n")
                 if tool.parameters:
                     lines.append("**Parameters:**")
                     for param in tool.parameters:
@@ -180,7 +180,7 @@ class ToolRegistry:
                             else ""
                         )
                         lines.append(
-                            f"- `{param.name}` ({param.type}{req}{default}): {param.description}"
+                            f"- `{param.name}` ({param.type}{req}{default}): {self._sanitize_md(param.description)}"
                         )
                     lines.append("")
 
@@ -258,6 +258,18 @@ class ToolRegistry:
         if isinstance(value, str):
             return f'"{value}"'
         return str(value)
+
+    @staticmethod
+    def _sanitize_md(text: str) -> str:
+        """Strip markdown control characters from untrusted text.
+
+        Prevents heading injection and code fence injection from MCP
+        tool descriptions in the system prompt docs.
+        """
+        # strip leading # markers that could inject fake headings
+        stripped = text.lstrip("#")
+        # neutralize backtick-fenced code blocks
+        return stripped.replace("```", "\\`\\`\\`")
 
 
 TOOL_REGISTRY = ToolRegistry()

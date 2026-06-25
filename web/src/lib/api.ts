@@ -201,12 +201,20 @@ export const api = {
     }),
   approveMCPTool: (serverName: string, toolName: string) =>
     fetchJSON<{ message: string }>(
-      `${API_BASE}/mcp/servers/${enc(serverName)}/tools/${enc(toolName)}/approve`,
-      { method: "POST" },
+      `${API_BASE}/mcp/servers/${enc(serverName)}/tools/approve`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tool_name: toolName }),
+      },
     ),
   revokeMCPTool: (serverName: string, toolName: string) =>
     fetchJSON<{ message: string }>(
-      `${API_BASE}/mcp/servers/${enc(serverName)}/tools/${enc(toolName)}/revoke`,
-      { method: "POST" },
+      `${API_BASE}/mcp/servers/${enc(serverName)}/tools/revoke`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tool_name: toolName }),
+      },
     ),
 };

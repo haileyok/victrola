@@ -147,3 +147,7 @@ class MCPServerDetail(BaseModel):
     enabled: bool
     connected: bool
     tools: list[MCPToolSummary]
+
+
+class ToolActionRequest(BaseModel):
+    tool_name: str

@@ -518,7 +518,10 @@ async def test_web_approve_tool(tmp_path):
     app.include_router(mcp_router.router, prefix="/api")
 
     client = TestClient(app)
-    resp = client.post("/api/mcp/servers/webtest/tools/tool1/approve")
+    resp = client.post(
+        "/api/mcp/servers/webtest/tools/approve",
+        json={"tool_name": "tool1"},
+    )
     assert resp.status_code == 200
     assert "approved" in resp.json()["message"]
 
@@ -602,3 +605,128 @@ async def test_connect_failure_cleans_up_exit_stack(tmp_path):
     # Connection should not be stored
     assert "failtest" not in manager._connections
     await store.close()
+
+
+# ---------------------------------------------------------------------------
+# Reserved word validation tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_server_rejects_ts_reserved_word(tmp_path):
+    """create_server rejects TypeScript reserved words as server names."""
+    manager, store = await _make_manager(tmp_path)
+    for bad_name in ["class", "default", "await", "function", "import"]:
+        config = MCPServerConfig(name=bad_name, transport="sse", url="https://example.com")
+        result = await manager.create_server(config)
+        assert "reserved word" in result.lower(), f"Should reject '{bad_name}'"
+    await store.close()
+
+
+def test_sanitize_reserved_word_gets_suffix():
+    """_sanitize_tool_name appends _ to reserved words."""
+    assert MCPManager._sanitize_tool_name("class") == "class_"
+    assert MCPManager._sanitize_tool_name("await") == "await_"
+    assert MCPManager._sanitize_tool_name("function") == "function_"
+
+
+# ---------------------------------------------------------------------------
+# Param collision detection tests
+# ---------------------------------------------------------------------------
+
+
+def test_schema_param_collision_disambiguated():
+    """Properties that sanitize to the same name get numeric suffixes."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "foo-bar": {"type": "string"},
+            "foo_bar": {"type": "string"},
+            "foo.bar": {"type": "string"},
+        },
+    }
+    params, param_map = MCPManager._schema_to_parameters(schema)
+    names = [p.name for p in params]
+    # all unique
+    assert len(names) == len(set(names))
+    # first one keeps base name, others get suffixes
+    assert "foo_bar" in names
+    assert "foo_bar_2" in names
+    assert "foo_bar_3" in names
+    # all map back to originals
+    assert len(param_map) == 3
+    originals = set(param_map.values())
+    assert originals == {"foo-bar", "foo_bar", "foo.bar"}
+
+
+# ---------------------------------------------------------------------------
+# Union type / non-dict schema tests
+# ---------------------------------------------------------------------------
+
+
+def test_schema_union_type_handled():
+    """Union types like ['string', 'null'] don't crash _schema_to_parameters."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "optional_str": {"type": ["string", "null"], "description": "Maybe string"},
+        },
+    }
+    params, _ = MCPManager._schema_to_parameters(schema)
+    assert len(params) == 1
+    assert params[0].type == "string"  # first type in union
+
+
+def test_schema_missing_type_defaults_string():
+    """Properties with no type field default to 'string'."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "notype": {"description": "No type field"},
+        },
+    }
+    params, _ = MCPManager._schema_to_parameters(schema)
+    assert params[0].type == "string"
+
+
+def test_schema_non_dict_property_handled():
+    """Non-dict property schemas don't crash."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "weird": True,  # boolean schema (JSON Schema allows this)
+        },
+    }
+    params, _ = MCPManager._schema_to_parameters(schema)
+    assert len(params) == 1
+    assert params[0].type == "string"
+
+
+# ---------------------------------------------------------------------------
+# Markdown sanitization tests
+# ---------------------------------------------------------------------------
+
+
+def test_markdown_sanitization_strips_headings():
+    """_sanitize_md strips leading # and neutralizes code fences."""
+    from src.tools.registry import ToolRegistry, Tool
+
+    reg = ToolRegistry()
+
+    async def handler(ctx, **kw):
+        pass
+
+    reg.register(
+        Tool(
+            name="md.test",
+            description="## Fake Heading\n```evil```",
+            parameters=[],
+            handler=handler,
+        )
+    )
+
+    docs = reg.generate_tool_documentation()
+    # Should not contain raw ## heading or ```
+    assert "## Fake Heading" not in docs
+    assert "```" not in docs
+    reg.unregister("md.test")

@@ -14,6 +14,7 @@ from src.web.schemas import (
     MCPServerDetail,
     MCPServerSummary,
     MCPToolSummary,
+    ToolActionRequest,
 )
 
 router = APIRouter(prefix="/mcp")
@@ -189,33 +190,33 @@ async def refresh_server(
     return _server_to_detail(config, mgr, sm)
 
 
-@router.post("/servers/{name}/tools/{tool_name}/approve")
+@router.post("/servers/{name}/tools/approve")
 async def approve_tool(
     name: str,
-    tool_name: str,
+    body: ToolActionRequest,
     executor: ToolExecutor = Depends(get_executor),
 ) -> dict[str, Any]:
     mgr = _get_manager(executor)
     config = mgr.get_server(name)
     if config is None:
         raise HTTPException(404, f"MCP server '{name}' not found")
-    result = await mgr.approve_tool(name, tool_name)
+    result = await mgr.approve_tool(name, body.tool_name)
     if "not found" in result:
         raise HTTPException(404, result)
     return {"message": result}
 
 
-@router.post("/servers/{name}/tools/{tool_name}/revoke")
+@router.post("/servers/{name}/tools/revoke")
 async def revoke_tool(
     name: str,
-    tool_name: str,
+    body: ToolActionRequest,
     executor: ToolExecutor = Depends(get_executor),
 ) -> dict[str, Any]:
     mgr = _get_manager(executor)
     config = mgr.get_server(name)
     if config is None:
         raise HTTPException(404, f"MCP server '{name}' not found")
-    result = await mgr.revoke_tool(name, tool_name)
+    result = await mgr.revoke_tool(name, body.tool_name)
     if "not found" in result:
         raise HTTPException(404, result)
     return {"message": result}

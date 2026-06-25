@@ -37,6 +37,16 @@ _RESERVED_NAMESPACES = {
     "custom_tools",
 }
 
+# TypeScript/JavaScript reserved words that must not be used as identifiers
+_TS_RESERVED_WORDS = frozenset({
+    "break", "case", "catch", "class", "const", "continue", "debugger", "default",
+    "delete", "do", "else", "enum", "export", "extends", "false", "finally", "for",
+    "function", "if", "import", "in", "instanceof", "new", "null", "return", "super",
+    "switch", "this", "throw", "true", "try", "typeof", "var", "void", "while", "with",
+    "yield", "let", "static", "await", "async", "implements", "interface", "package",
+    "private", "protected", "public", "type", "as", "from", "of", "namespace",
+})
+
 # Valid server name: must be a valid TypeScript identifier (letter/underscore start, alphanumeric/underscore body)
 _SERVER_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
@@ -267,6 +277,13 @@ class MCPManager:
         self._registry = registry
         self._servers: dict[str, MCPServerConfig] = {}
         self._connections: dict[str, MCPConnection] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def _get_lock(self, name: str) -> asyncio.Lock:
+        """Get or create a per-server lock for serializing operations."""
+        if name not in self._locks:
+            self._locks[name] = asyncio.Lock()
+        return self._locks[name]
 
     # -- loading from store --
 
@@ -306,6 +323,10 @@ class MCPManager:
 
     async def connect_server(self, name: str) -> None:
         """Connect to a server, discover tools, and register approved tools."""
+        async with self._get_lock(name):
+            await self._connect_server_impl(name)
+
+    async def _connect_server_impl(self, name: str) -> None:
         config = self._servers.get(name)
         if config is None:
             raise ValueError(f"MCP server '{name}' not found")
@@ -318,16 +339,26 @@ class MCPManager:
         await conn.connect()
         self._connections[name] = conn
 
-        # discover tools (updates config.tools)
-        await self.discover_tools(name)
+        try:
+            # discover tools (updates config.tools)
+            await self.discover_tools(name)
 
-        # register any previously-approved tools
-        for tool in config.tools:
-            if tool.approved:
-                self._register_tool(name, tool)
+            # register any previously-approved tools
+            for tool in config.tools:
+                if tool.approved:
+                    self._register_tool(name, tool)
+        except BaseException:
+            # Clean up the connection if discovery or registration failed
+            # so we don't leave a live session with no tools registered.
+            await self.disconnect_server(name)
+            raise
 
     async def disconnect_server(self, name: str) -> None:
         """Disconnect a server and unregister its tools."""
+        async with self._get_lock(name):
+            await self._disconnect_server_impl(name)
+
+    async def _disconnect_server_impl(self, name: str) -> None:
         # unregister all approved tools for this server
         config = self._servers.get(name)
         if config:
@@ -360,6 +391,10 @@ class MCPManager:
 
     async def discover_tools(self, name: str) -> None:
         """Re-discover tools from a connected server. Persists updated config."""
+        async with self._get_lock(name):
+            await self._discover_tools_impl(name)
+
+    async def _discover_tools_impl(self, name: str) -> None:
         config = self._servers.get(name)
         if config is None:
             raise ValueError(f"MCP server '{name}' not found")
@@ -441,6 +476,10 @@ class MCPManager:
 
     async def approve_tool(self, server_name: str, tool_name: str) -> str:
         """Approve a tool — registers it in the registry."""
+        async with self._get_lock(server_name):
+            return await self._approve_tool_impl(server_name, tool_name)
+
+    async def _approve_tool_impl(self, server_name: str, tool_name: str) -> str:
         config = self._servers.get(server_name)
         if config is None:
             return f"MCP server '{server_name}' not found."
@@ -462,6 +501,10 @@ class MCPManager:
 
     async def revoke_tool(self, server_name: str, tool_name: str) -> str:
         """Revoke a tool — unregisters it from the registry."""
+        async with self._get_lock(server_name):
+            return await self._revoke_tool_impl(server_name, tool_name)
+
+    async def _revoke_tool_impl(self, server_name: str, tool_name: str) -> str:
         config = self._servers.get(server_name)
         if config is None:
             return f"MCP server '{server_name}' not found."
@@ -511,6 +554,8 @@ class MCPManager:
             )
         if config.name in _RESERVED_NAMESPACES:
             return f"Error: server name '{config.name}' is a reserved namespace."
+        if config.name in _TS_RESERVED_WORDS:
+            return f"Error: server name '{config.name}' is a TypeScript reserved word."
         if config.name in self._servers:
             return f"Error: server '{config.name}' already exists."
 
@@ -625,10 +670,12 @@ class MCPManager:
 
     @staticmethod
     def _sanitize_tool_name(name: str) -> str:
-        """Replace non-identifier characters with underscore, ensure valid start."""
+        """Replace non-identifier characters with underscore, ensure valid start, avoid reserved words."""
         sanitized = _SANITIZE_PATTERN.sub("_", name)
         if sanitized and not sanitized[0].isalpha() and sanitized[0] != "_":
             sanitized = "_" + sanitized
+        if sanitized in _TS_RESERVED_WORDS:
+            sanitized += "_"
         return sanitized
 
     @staticmethod
@@ -636,6 +683,7 @@ class MCPManager:
         """Convert a JSON Schema to ToolParameter list + param name mapping.
 
         Returns (params, mapping) where mapping is sanitized_name -> original_name.
+        Sanitized names are made unique with numeric suffixes if collisions occur.
         """
         props = schema.get("properties", {})
         required = set(schema.get("required", []))
@@ -649,13 +697,30 @@ class MCPManager:
         }
         params: list[ToolParameter] = []
         param_map: dict[str, str] = {}
+        used_names: set[str] = set()
+
         for prop_name, prop in props.items():
+            if not isinstance(prop, dict):
+                prop = {}
             sanitized_name = MCPManager._sanitize_tool_name(prop_name)
+            # disambiguate if collision
+            if sanitized_name in used_names:
+                i = 2
+                while f"{sanitized_name}_{i}" in used_names:
+                    i += 1
+                sanitized_name = f"{sanitized_name}_{i}"
+            used_names.add(sanitized_name)
             param_map[sanitized_name] = prop_name
+
+            # normalize type — handle union types, missing type, etc.
+            raw_type = prop.get("type", "string")
+            if isinstance(raw_type, list):
+                raw_type = raw_type[0] if raw_type else "string"
+
             params.append(
                 ToolParameter(
                     name=sanitized_name,
-                    type=type_map.get(prop.get("type", "string"), "string"),
+                    type=type_map.get(raw_type, "string"),
                     description=prop.get("description", ""),
                     required=prop_name in required,
                 )
