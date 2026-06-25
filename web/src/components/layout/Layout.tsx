@@ -1,5 +1,5 @@
 import { Outlet, Link, useLocation } from "react-router-dom";
-import { MessageSquare, Wrench, Key, Clock, FileText, Plug } from "lucide-react";
+import { MessageSquare, Wrench, Key, Clock, FileText, Plug, Brain } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const navItems = [
@@ -9,6 +9,7 @@ const navItems = [
   { to: "/secrets", label: "Secrets", icon: Key },
   { to: "/schedules", label: "Schedules", icon: Clock },
   { to: "/system-prompt", label: "Prompt", icon: FileText },
+  { to: "/memory", label: "Memory", icon: Brain },
 ];
 
 export function Layout() {

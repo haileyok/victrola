@@ -178,3 +178,55 @@ class ToolActionRequest(BaseModel):
 
 class OAuthCallbackRequest(BaseModel):
     redirect_url: str
+
+
+# -- memory models --
+
+
+class MemoryEntryResponse(BaseModel):
+    id: int
+    type: str
+    scope: str
+    content: str
+    metadata: dict[str, Any] = {}
+    createdAt: str = ""
+    updatedAt: str = ""
+
+
+class MemoryListResponse(BaseModel):
+    entries: list[MemoryEntryResponse]
+    cursor: int | None = None
+
+
+class CreateMemoryEntryRequest(BaseModel):
+    type: str
+    scope: str
+    content: str
+    tags: list[str] = []
+
+
+class UpdateMemoryEntryRequest(BaseModel):
+    content: str | None = None
+    tags: list[str] | None = None
+
+
+class MemorySearchRequest(BaseModel):
+    query: str
+    type: str | None = None
+    types: list[str] | None = None
+    scope: str | None = None
+    tags: list[str] | None = None
+    limit: int = 10
+
+
+class MemorySearchResult(BaseModel):
+    id: int
+    type: str
+    scope: str
+    content: str
+    score: float
+    matched_by: str
+
+
+class MemorySearchResponse(BaseModel):
+    results: list[MemorySearchResult]

@@ -47,6 +47,11 @@ async def _build_full_executor(tmp_path: Path) -> ToolExecutor:
     executor._custom_tool_manager = ctm
     ctx._custom_tool_manager = ctm
 
+    # attach search engine (keyword-only, no embedding client)
+    from src.memory.search import SearchEngine
+    search_engine = SearchEngine(store=store.memory, embedding_client=None)
+    ctx._search_engine = search_engine
+
     return executor
 
 
@@ -472,3 +477,152 @@ class TestChatSSE:
             assert resp.status_code == 409
         finally:
             lock.release()
+
+
+class TestMemory:
+    def test_list_empty(self, app_client):
+        resp = app_client.get("/api/memory")
+        assert resp.status_code == 200
+        assert resp.json()["entries"] == []
+
+    def test_create_and_get(self, app_client):
+        resp = app_client.post("/api/memory", json={
+            "type": "episodic", "scope": "test-session",
+            "content": "User deployed to prod", "tags": ["deploy"],
+        })
+        assert resp.status_code == 201
+        entry_id = resp.json()["id"]
+
+        resp = app_client.get(f"/api/memory/{entry_id}")
+        assert resp.status_code == 200
+        assert resp.json()["content"] == "User deployed to prod"
+
+    def test_create_invalid_type(self, app_client):
+        resp = app_client.post("/api/memory", json={
+            "type": "invalid", "scope": "x", "content": "test",
+        })
+        assert resp.status_code == 422
+
+    def test_create_empty_content_rejected(self, app_client):
+        """Empty or whitespace-only content is rejected (mirrors memory.add tool)."""
+        resp = app_client.post("/api/memory", json={
+            "type": "factual", "scope": "topic", "content": "",
+        })
+        assert resp.status_code == 422
+        resp = app_client.post("/api/memory", json={
+            "type": "factual", "scope": "topic", "content": "   ",
+        })
+        assert resp.status_code == 422
+
+    def test_create_self_singleton_conflict(self, app_client):
+        # create first self entry
+        app_client.post("/api/memory", json={
+            "type": "self", "scope": "self", "content": "I am the agent",
+        })
+        # second should fail
+        resp = app_client.post("/api/memory", json={
+            "type": "self", "scope": "self", "content": "duplicate",
+        })
+        assert resp.status_code == 409
+
+    def test_update(self, app_client):
+        create = app_client.post("/api/memory", json={
+            "type": "factual", "scope": "topic", "content": "original",
+        })
+        entry_id = create.json()["id"]
+        resp = app_client.put(f"/api/memory/{entry_id}", json={
+            "content": "updated content", "tags": ["new-tag"],
+        })
+        assert resp.status_code == 200
+        assert resp.json()["content"] == "updated content"
+        assert resp.json()["metadata"]["tags"] == ["new-tag"]
+
+    def test_update_content_preserves_existing_tags(self, app_client):
+        """Content-only update must not clobber existing tags."""
+        create = app_client.post("/api/memory", json={
+            "type": "factual", "scope": "topic",
+            "content": "original", "tags": ["keep-me"],
+        })
+        entry_id = create.json()["id"]
+        # Update only content — tags should be preserved
+        resp = app_client.put(f"/api/memory/{entry_id}", json={
+            "content": "new content",
+        })
+        assert resp.status_code == 200
+        assert resp.json()["content"] == "new content"
+        assert resp.json()["metadata"]["tags"] == ["keep-me"]
+
+    def test_update_empty_content_rejected(self, app_client):
+        """Empty/whitespace content on update is rejected."""
+        create = app_client.post("/api/memory", json={
+            "type": "factual", "scope": "topic", "content": "original",
+        })
+        entry_id = create.json()["id"]
+        resp = app_client.put(f"/api/memory/{entry_id}", json={
+            "content": "",
+        })
+        assert resp.status_code == 422
+        resp = app_client.put(f"/api/memory/{entry_id}", json={
+            "content": "   ",
+        })
+        assert resp.status_code == 422
+
+    def test_delete(self, app_client):
+        create = app_client.post("/api/memory", json={
+            "type": "factual", "scope": "topic", "content": "to delete",
+        })
+        entry_id = create.json()["id"]
+        resp = app_client.delete(f"/api/memory/{entry_id}")
+        assert resp.status_code == 204
+        resp = app_client.get(f"/api/memory/{entry_id}")
+        assert resp.status_code == 404
+
+    def test_delete_not_found(self, app_client):
+        resp = app_client.delete("/api/memory/99999")
+        assert resp.status_code == 404
+
+    def test_search(self, app_client):
+        app_client.post("/api/memory", json={
+            "type": "factual", "scope": "topic",
+            "content": "The deploy process uses blue-green strategy",
+        })
+        app_client.post("/api/memory", json={
+            "type": "factual", "scope": "topic",
+            "content": "Pizza is best with pineapple",
+        })
+        resp = app_client.post("/api/memory/search", json={
+            "query": "deploy",
+        })
+        assert resp.status_code == 200
+        results = resp.json()["results"]
+        assert len(results) >= 1
+        assert "deploy" in results[0]["content"].lower()
+
+    def test_search_empty_query(self, app_client):
+        resp = app_client.post("/api/memory/search", json={"query": ""})
+        assert resp.status_code == 422
+
+    def test_search_engine_unavailable_returns_503(self, app_client):
+        """When SearchEngine is not configured, search returns 503 but list still works."""
+        original_se = app_client._executor.ctx._search_engine
+        app_client._executor.ctx._search_engine = None
+        try:
+            resp = app_client.post("/api/memory/search", json={"query": "anything"})
+            assert resp.status_code == 503
+            # Other endpoints still work
+            resp = app_client.get("/api/memory")
+            assert resp.status_code == 200
+        finally:
+            app_client._executor.ctx._search_engine = original_se
+
+    def test_filter_by_type(self, app_client):
+        app_client.post("/api/memory", json={
+            "type": "factual", "scope": "topic", "content": "fact",
+        })
+        app_client.post("/api/memory", json={
+            "type": "episodic", "scope": "topic", "content": "event",
+        })
+        resp = app_client.get("/api/memory?type=factual")
+        assert resp.status_code == 200
+        entries = resp.json()["entries"]
+        assert all(e["type"] == "factual" for e in entries)

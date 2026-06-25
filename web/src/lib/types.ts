@@ -121,3 +121,33 @@ export interface ParsedMessage {
   role: string;
   content: string;
 }
+
+// -- memory --
+
+export interface MemoryEntry {
+  id: number;
+  type: string;
+  scope: string;
+  content: string;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MemoryEntryList {
+  entries: MemoryEntry[];
+  cursor: number | null;
+}
+
+export interface MemorySearchResult {
+  id: number;
+  type: string;
+  scope: string;
+  content: string;
+  score: number;
+  matched_by: string;
+}
+
+export interface MemorySearchResponse {
+  results: MemorySearchResult[];
+}

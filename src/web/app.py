@@ -14,6 +14,7 @@ from src.config import CONFIG
 from src.web.routers import (
     chat,
     mcp,
+    memory,
     schedules,
     secrets,
     sessions,
@@ -77,6 +78,7 @@ def create_app(agent, executor, conversation_manager) -> FastAPI:
     app.include_router(schedules.router, prefix="/api")
     app.include_router(mcp.router, prefix="/api")
     app.include_router(system_prompt.router, prefix="/api")
+    app.include_router(memory.router, prefix="/api")
 
     static_dir = Path(__file__).parent / "static"
 

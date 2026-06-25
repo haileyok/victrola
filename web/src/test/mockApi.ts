@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import type { Status, Session, SessionList, MessageList, ToolSummary, ToolDetail, Secret, Schedule, SystemPrompt } from "@/lib/types";
+import type { Status, Session, SessionList, MessageList, ToolSummary, ToolDetail, Secret, Schedule, SystemPrompt, MemoryEntry, MemoryEntryList, MemorySearchResponse } from "@/lib/types";
 
 type MockApi = {
   getStatus: ReturnType<typeof vi.fn>;
@@ -23,6 +23,12 @@ type MockApi = {
   disableSchedule: ReturnType<typeof vi.fn>;
   deleteSchedule: ReturnType<typeof vi.fn>;
   getSystemPrompt: ReturnType<typeof vi.fn>;
+  listMemory: ReturnType<typeof vi.fn>;
+  getMemory: ReturnType<typeof vi.fn>;
+  createMemory: ReturnType<typeof vi.fn>;
+  updateMemory: ReturnType<typeof vi.fn>;
+  deleteMemory: ReturnType<typeof vi.fn>;
+  searchMemory: ReturnType<typeof vi.fn>;
 };
 
 export function makeMockApi(): MockApi {
@@ -48,6 +54,12 @@ export function makeMockApi(): MockApi {
     disableSchedule: vi.fn(),
     deleteSchedule: vi.fn(),
     getSystemPrompt: vi.fn(),
+    listMemory: vi.fn(),
+    getMemory: vi.fn(),
+    createMemory: vi.fn(),
+    updateMemory: vi.fn(),
+    deleteMemory: vi.fn(),
+    searchMemory: vi.fn(),
   };
 }
 
@@ -162,4 +174,50 @@ export const mockSystemPrompt: SystemPrompt = {
   text: "You are a helpful assistant.\n\nFollow instructions carefully.",
   char_count: 52,
   token_estimate: 13,
+};
+
+// -- memory mock data --
+
+export const mockMemoryEntries: MemoryEntry[] = [
+  {
+    id: 1,
+    type: "self",
+    scope: "self",
+    content: "You are Victrola, a personal AI assistant.",
+    metadata: {},
+    createdAt: "2024-01-01T00:00:00.000Z",
+    updatedAt: "2024-01-01T00:00:00.000Z",
+  },
+  {
+    id: 2,
+    type: "factual",
+    scope: "topic",
+    content: "Deploys use blue-green strategy with 5-minute health checks.",
+    metadata: { tags: ["deploy"] },
+    createdAt: "2024-01-02T00:00:00.000Z",
+    updatedAt: "2024-01-02T00:00:00.000Z",
+  },
+];
+
+export const mockMemoryList: MemoryEntryList = {
+  entries: mockMemoryEntries,
+  cursor: null,
+};
+
+export const mockMemoryListWithMore: MemoryEntryList = {
+  entries: mockMemoryEntries,
+  cursor: 3,
+};
+
+export const mockMemorySearchResults: MemorySearchResponse = {
+  results: [
+    {
+      id: 2,
+      type: "factual",
+      scope: "topic",
+      content: "Deploys use blue-green strategy with 5-minute health checks.",
+      score: 0.95,
+      matched_by: "both",
+    },
+  ],
 };
