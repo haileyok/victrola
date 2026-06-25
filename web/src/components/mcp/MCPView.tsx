@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { Plus, Trash2, Plug } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import type { MCPServerSummary } from "@/lib/types";
 import { Button } from "@/components/ui/button";
