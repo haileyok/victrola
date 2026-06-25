@@ -661,6 +661,11 @@ class ChatStore:
         compacted_up_to_msg_id column on chat_sessions in a single
         transaction. Raw messages are not deleted — they remain in
         chat_messages for auditability but are skipped on load.
+
+        The checkpoint only advances forward: the UPDATE has a monotonic
+        guard (`compacted_up_to_msg_id IS NULL OR < new value`) so a
+        regressed write is silently ignored, preventing duplicated context
+        on reload.
         """
         now = _now()
         async with self._write_lock:
@@ -673,8 +678,10 @@ class ChatStore:
                     (session_id, summary, compacted_up_to_msg_id, now),
                 )
                 await self._db.execute(
-                    "UPDATE chat_sessions SET compacted_up_to_msg_id = ? WHERE rkey = ?",
-                    (compacted_up_to_msg_id, session_id),
+                    "UPDATE chat_sessions SET compacted_up_to_msg_id = ? "
+                    "WHERE rkey = ? "
+                    "AND (compacted_up_to_msg_id IS NULL OR compacted_up_to_msg_id < ?)",
+                    (compacted_up_to_msg_id, session_id, compacted_up_to_msg_id),
                 )
                 await self._db.commit()
             except Exception:

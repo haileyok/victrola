@@ -143,7 +143,7 @@ async def _send_default_notification(
 
         for chunk in _chunk(message):
             try:
-                await executor.ctx.http_client.post(
+                resp = await executor.ctx.http_client.post(
                     f"http://{CONFIG.signal_service}/v2/send/{CONFIG.signal_bot_phone}",
                     json={
                         "message": chunk,
@@ -152,6 +152,13 @@ async def _send_default_notification(
                 )
             except Exception:
                 logger.exception("Failed to send scheduled notification via Signal")
+                return
+            if resp.status_code >= 400:
+                logger.error(
+                    "Scheduled Signal notification failed: HTTP %d — %s",
+                    resp.status_code,
+                    resp.text[:200],
+                )
                 return
     else:
         # Discord fallback — read webhook from secrets, truncate at 2000 chars
