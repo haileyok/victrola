@@ -36,30 +36,16 @@ class VictrolaApp(App):
         except Exception:
             logger.exception("Executor init failed")
 
-        # build conversation manager now that the store is ready
+        # build conversation manager now that the store is ready.
+        # reuse the sub-agent LLM client already built by build_services()
+        # (stored on ToolContext) rather than re-resolving from CONFIG,
+        # so CLI overrides propagate correctly.
         try:
             from src.agent.conversation import ConversationManager
-            from src.agent.llm import SubAgentLLM
-            from src.config import CONFIG
-            from src.agent.config_utils import resolve_sub_agent_key as _resolve_sub_agent_key
 
-            sub_api_key = _resolve_sub_agent_key(
-                model_api=CONFIG.model_api,
-                model_api_key=CONFIG.model_api_key,
-                sub_model_api=CONFIG.sub_model_api,
-                sub_model_api_key=CONFIG.sub_model_api_key,
-            )
-            llm_client = None
-            if sub_api_key:
-                llm_client = SubAgentLLM(
-                    api=CONFIG.sub_model_api,
-                    model=CONFIG.sub_model_name,
-                    api_key=sub_api_key,
-                    endpoint=CONFIG.sub_model_endpoint or None,
-                )
             self.conversation_manager = ConversationManager(
                 ctx=self.executor._ctx,
-                llm_client=llm_client,
+                llm_client=self.executor.llm_client,
             )
         except Exception:
             logger.exception("Failed to build conversation manager")
@@ -71,7 +57,9 @@ class VictrolaApp(App):
             from main import _load_system_prompt
 
             async def _refresh_prompt() -> str:
-                return await _load_system_prompt(self.executor._ctx, self.executor)
+                return await _load_system_prompt(
+                    self.executor._ctx, self.executor, self.agent
+                )
 
             self.agent.system_prompt_provider = _refresh_prompt
             self.agent.system_prompt = await _refresh_prompt()

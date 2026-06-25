@@ -124,10 +124,27 @@ def _is_httpx_retryable(exc: Exception) -> bool:
 
 class AnthropicClient(AgentClient):
     def __init__(
-        self, api_key: str, model_name: str = "claude-sonnet-4-5-20250929"
+        self,
+        api_key: str,
+        model_name: str = "claude-sonnet-4-5-20250929",
+        base_url: str | None = None,
+        enable_cache_control: bool = True,
+        umans_websearch_provider: str = "none",
     ) -> None:
-        self._client = anthropic.AsyncAnthropic(api_key=api_key)
+        if umans_websearch_provider not in ("exa", "native", "none"):
+            raise ValueError(
+                f"invalid umans_websearch_provider: {umans_websearch_provider!r} "
+                "(must be 'exa', 'native', or 'none')"
+            )
+        headers: dict[str, str] = {}
+        if umans_websearch_provider != "none":
+            headers["X-Umans-Websearch-Provider"] = umans_websearch_provider
+        self._client = anthropic.AsyncAnthropic(
+            api_key=api_key, base_url=base_url, default_headers=headers
+        )
         self._model_name = model_name
+        self._enable_cache_control = enable_cache_control
+        self._native_web_search = umans_websearch_provider in ("exa", "native")
 
     async def aclose(self) -> None:
         """Close the underlying AsyncAnthropic client."""
@@ -139,23 +156,34 @@ class AnthropicClient(AgentClient):
         system: str | None = None,
         tools: list[dict[str, Any]] | None = None,
     ) -> AgentResponse:
-        system_text = system or build_system_prompt()
+        system_text = system or build_system_prompt(
+            native_web_search=self._native_web_search
+        )
         kwargs: dict[str, Any] = {
             "model": self._model_name,
             "max_tokens": 16_000,
-            "system": [
+            "messages": (
+                self._inject_cache_breakpoints(messages)
+                if self._enable_cache_control
+                else messages
+            ),
+        }
+
+        if self._enable_cache_control:
+            kwargs["system"] = [
                 {
                     "type": "text",
                     "text": system_text,
                     "cache_control": {"type": "ephemeral"},
                 }
-            ],
-            "messages": self._inject_cache_breakpoints(messages),
-        }
+            ]
+        else:
+            kwargs["system"] = system_text
 
         if tools:
             tools = [dict(t) for t in tools]
-            tools[-1]["cache_control"] = {"type": "ephemeral"}
+            if self._enable_cache_control:
+                tools[-1]["cache_control"] = {"type": "ephemeral"}
             kwargs["tools"] = tools
 
         async def _do_stream():
@@ -529,7 +557,7 @@ def _timestamp_prefix(message: str) -> str:
 class Agent:
     def __init__(
         self,
-        model_api: Literal["anthropic", "openai", "openapi"],
+        model_api: Literal["anthropic", "openai", "openapi", "umans"],
         model_name: str,
         model_api_key: str | None,
         model_endpoint: str | None = None,
@@ -539,13 +567,15 @@ class Agent:
         system_prompt_provider: Callable[[], Awaitable[str]] | None = None,
         sub_llm_client: Any | None = None,
         compact_threshold_chars: int = 240_000,
+        umans_websearch_provider: str = "none",
     ) -> None:
         match model_api:
             case "anthropic":
                 if not model_api_key:
                     raise ValueError("model_api_key is required for anthropic")
                 self._client: AgentClient = AnthropicClient(
-                    api_key=model_api_key, model_name=model_name
+                    api_key=model_api_key,
+                    model_name=model_name,
                 )
             case "openai":
                 if not model_api_key:
@@ -565,6 +595,24 @@ class Agent:
                     model_name=model_name,
                     endpoint=model_endpoint,
                 )
+            case "umans":
+                if not model_api_key:
+                    raise ValueError("model_api_key is required for umans")
+                from src.config import CONFIG
+
+                umans_base = model_endpoint or CONFIG.umans_endpoint
+                if not umans_base:
+                    raise ValueError(
+                        "umans_endpoint is required for umans "
+                        "(set UMANS_ENDPOINT or pass --model-endpoint)"
+                    )
+                self._client = AnthropicClient(
+                    api_key=model_api_key,
+                    model_name=model_name,
+                    base_url=umans_base,
+                    enable_cache_control=False,
+                    umans_websearch_provider=umans_websearch_provider,
+                )
 
         self._tool_executor = tool_executor
         self._max_iterations = max_iterations
@@ -572,6 +620,7 @@ class Agent:
         self._system_prompt_provider = system_prompt_provider
         self._sub_llm_client = sub_llm_client
         self._compact_threshold_chars = compact_threshold_chars
+        self._umans_websearch_provider = umans_websearch_provider
 
     # -- public read-only properties for TUI/Discord --
 
@@ -597,6 +646,11 @@ class Agent:
     def system_prompt_provider(self, value: Any) -> None:
         self._system_prompt_provider = value
 
+    @property
+    def native_web_search_enabled(self) -> bool:
+        """True when a server-side web search provider is active (Umans exa/native)."""
+        return self._umans_websearch_provider in ("exa", "native")
+
     async def refresh_system_prompt(self) -> str:
         """Call the system prompt provider and update the cached prompt."""
         if self._system_prompt_provider is not None:
@@ -616,11 +670,50 @@ class Agent:
         if self._tool_executor is None:
             return None
 
-        return [self._tool_executor.get_execute_code_tool_definition()]
+        tools: list[dict[str, Any]] = []
+
+        if self.native_web_search_enabled:
+            tools.append({
+                "name": "web_search",
+                "description": "Search the web for current information.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The search query",
+                        }
+                    },
+                    "required": ["query"],
+                },
+            })
+
+        tools.append(self._tool_executor.get_execute_code_tool_definition())
+        return tools
 
     async def _handle_tool_call(self, tool_use: AgentToolUseBlock) -> dict[str, Any]:
         """handle a tool call from the model"""
-        if tool_use.name == "execute_code" and self._tool_executor:
+        if tool_use.name == "web_search":
+            query = tool_use.input.get("query", "")
+            if self._tool_executor:
+                if not self._tool_executor.exa_client:
+                    return {
+                        "error": "web search not available: exa_api_key is not "
+                        "configured. Set EXA_API_KEY to enable fallback search."
+                    }
+                try:
+                    result = await self._tool_executor.registry.execute(
+                        self._tool_executor.ctx, "web.web_search", {"query": query}
+                    )
+                    return result
+                except Exception as e:
+                    logger.warning("web_search fallback failed: %s", e, exc_info=True)
+                    return {
+                        "error": f"web search failed: {e}. "
+                        "Set exa_api_key to enable fallback search."
+                    }
+            return {"error": "web search not available"}
+        elif tool_use.name == "execute_code" and self._tool_executor:
             code = tool_use.input.get("code", "")
             result = await self._tool_executor.execute_code(code)
             return result

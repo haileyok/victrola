@@ -61,6 +61,14 @@ class ToolExecutor:
     def exa_client(self) -> Any:
         return self._ctx._exa_client
 
+    @property
+    def ctx(self) -> ToolContext:
+        return self._ctx
+
+    @property
+    def registry(self) -> ToolRegistry:
+        return self._registry
+
     async def initialize(self) -> None:
         from src.config import CONFIG
 

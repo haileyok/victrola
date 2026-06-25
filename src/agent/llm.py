@@ -24,7 +24,7 @@ class SubAgentLLM:
 
     def __init__(
         self,
-        api: Literal["anthropic", "openai", "openapi"],
+        api: Literal["anthropic", "openai", "openapi", "umans"],
         model: str,
         api_key: str,
         endpoint: str | None = None,
@@ -41,7 +41,7 @@ class SubAgentLLM:
         max_tokens: int = MAX_SUB_AGENT_TOKENS,
     ) -> str:
         """Single-shot text completion. Returns the response text."""
-        if self._api == "anthropic":
+        if self._api in ("anthropic", "umans"):
             return await self._complete_anthropic(prompt, system, max_tokens)
         else:
             return await self._complete_openai(prompt, system, max_tokens)
@@ -51,7 +51,9 @@ class SubAgentLLM:
     ) -> str:
         import anthropic
 
-        client = anthropic.AsyncAnthropic(api_key=self._api_key)
+        client = anthropic.AsyncAnthropic(
+            api_key=self._api_key, base_url=self._endpoint
+        )
         try:
             kwargs: dict[str, Any] = {
                 "model": self._model,
