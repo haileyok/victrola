@@ -22,6 +22,7 @@ class CustomTool:
     approved: bool = False
     response_schema: dict[str, Any] | None = None
     secrets: list[str] = field(default_factory=list)
+    requires_net: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -30,6 +31,7 @@ class CustomTool:
             "parameters": self.parameters,
             "code": self.code,
             "approved": self.approved,
+            "requiresNet": self.requires_net,
         }
         if self.response_schema:
             d["responseSchema"] = self.response_schema
@@ -47,6 +49,7 @@ class CustomTool:
             approved=data.get("approved", False),
             response_schema=data.get("responseSchema", data.get("response_schema")),
             secrets=data.get("secrets", []),
+            requires_net=data.get("requiresNet", data.get("requires_net", False)),
         )
 
 
@@ -132,7 +135,7 @@ class CustomToolManager:
             code=tool.code,
             params=params,
             env=env,
-            allow_net=True,
+            allow_net=tool.requires_net,
         )
 
     def _build_env(self, tool: CustomTool) -> dict[str, str]:
