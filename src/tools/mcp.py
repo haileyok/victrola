@@ -300,7 +300,7 @@ class MCPOAuthTokenStorage:
 
     Implements the MCP SDK's TokenStorage protocol so it can be passed
     to OAuthClientProvider. Tokens are stored as JSON documents with
-    the rkey prefix 'mcpoauth:'.
+    the rkey prefix 'mcptoken:'.
     """
 
     def __init__(self, store: Store, server_name: str) -> None:
