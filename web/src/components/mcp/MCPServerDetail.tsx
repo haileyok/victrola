@@ -147,12 +147,22 @@ export function MCPServerDetail() {
     for (let i = 0; i < 60; i++) {
       await new Promise((r) => setTimeout(r, 3000));
       try {
-        const oauthInfo = await api.getOAuthConsentUrl(name);
-        if (!oauthInfo.pending_callback && !oauthInfo.consent_url) {
-          // Flow completed — refresh server state
+        // Check if the server is now connected (OAuth flow completed)
+        const updated = await api.getMCPServer(name);
+        if (updated.connected) {
+          setServer(updated);
           setOauthConsentUrl(null);
           setOauthPending(false);
-          await refresh();
+          return;
+        }
+        // Check if there was an error (consent URL cleared, not connected)
+        const oauthInfo = await api.getOAuthConsentUrl(name);
+        if (!oauthInfo.pending_callback && !oauthInfo.consent_url && !updated.connected) {
+          // Flow ended without connecting — likely an error
+          setOauthConsentUrl(null);
+          setOauthPending(false);
+          setServer(updated);
+          setError("OAuth flow completed but server did not connect. Check server logs.");
           return;
         }
       } catch {
@@ -171,6 +181,7 @@ export function MCPServerDetail() {
     try {
       await api.submitOAuthCallback(name, callbackUrl);
       setCallbackUrl("");
+      setBusy(false);
       // The connect should complete now — poll for the result
       pollOAuthStatus();
     } catch (e) {
