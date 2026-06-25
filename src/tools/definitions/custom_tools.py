@@ -69,6 +69,12 @@ Use `list_available_secrets` to see what secrets the operator has configured. Re
             description="Optional list of environment variable names to inject into the Deno process.",
             required=False,
         ),
+        ToolParameter(
+            name="requires_net",
+            type="boolean",
+            description="Set to true if the tool needs network access (fetch, HTTP). Defaults to false — tools run without network access unless explicitly requested.",
+            required=False,
+        ),
     ],
 )
 async def create_custom_tool(
@@ -79,6 +85,7 @@ async def create_custom_tool(
     code: str,
     response_schema: dict[str, Any] | None = None,
     secrets: list[str] | None = None,
+    requires_net: bool = False,
 ) -> str:
     manager = ctx.custom_tool_manager
     if manager is None:
@@ -94,6 +101,7 @@ async def create_custom_tool(
         approved=False,
         response_schema=response_schema,
         secrets=secrets or [],
+        requires_net=requires_net,
     )
     return await manager.create_tool(tool)
 

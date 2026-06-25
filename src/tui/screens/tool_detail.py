@@ -73,6 +73,8 @@ class ToolDetailScreen(Screen):
         status = "approved" if tool.approved else "pending review"
         await body.mount(Static(f"[b]Status:[/b] {status}", markup=True))
         await body.mount(Static(f"[b]Description:[/b] {tool.description}", markup=True))
+        net_label = "yes — tool can make network calls" if tool.requires_net else "no (sandboxed)"
+        await body.mount(Static(f"[b]Requires network:[/b] {net_label}", markup=True))
 
         # parameters
         await body.mount(Static("[b]Parameters:[/b]", markup=True))
