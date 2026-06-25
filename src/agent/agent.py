@@ -776,7 +776,7 @@ class Agent:
         for k, v in usage.items():
             total[k] = total.get(k, 0) + v
 
-    async def _maybe_compact(self, conversation: list[dict[str, Any]]) -> None:
+    async def _maybe_compact(self, conversation: list[dict[str, Any]], on_compact: Callable[[str, int], Awaitable[None]] | None = None) -> None:
         """Summarize older conversation messages when the char budget is exceeded.
 
         Keeps the most recent ~25% of the budget as raw messages; replaces
@@ -855,6 +855,18 @@ class Agent:
             len(summary),
             len(recent),
         )
+
+        # Notify the caller so they can persist the checkpoint to the store.
+        # The callback receives (summary, split_idx) where split_idx is the
+        # number of messages from the start of the conversation that were
+        # summarized. The caller maps split_idx to store message IDs via a
+        # parallel ID list. Runs before the list mutation below.
+        if on_compact:
+            try:
+                await on_compact(summary, split_idx)
+            except Exception:
+                logger.exception("on_compact callback failed; continuing with in-memory compaction")
+
         # Use slice assignment so the caller's list is mutated in place
         # (a plain `conversation = ...` would only rebind the local).
         conversation[:] = [
@@ -871,6 +883,7 @@ class Agent:
         user_message: str,
         conversation: list[dict[str, Any]],
         on_event: Callable[[AgentEvent], Awaitable[None]] | None = None,
+        on_compact: Callable[[str, int], Awaitable[None]] | None = None,
         images: list[dict[str, str]] | None = None,
     ) -> str:
         """Send a message and get a response, handling tool calls.
@@ -885,19 +898,27 @@ class Agent:
         `{"media_type": "image/png", "data": "<base64>"}`. Images are ephemeral
         — they only affect this turn; nothing is persisted to the conversation
         store for them.
+
+        `on_compact` is an optional callback invoked when the agent compacts
+        older conversation messages. It receives `(summary, split_idx)` where
+        `split_idx` is the number of messages from the start of the conversation
+        that were summarized. Callers use this to persist a compaction checkpoint
+        to the store so the summary can be reused on reload instead of
+        re-summarizing from scratch.
         """
 
         async def _emit(event: AgentEvent) -> None:
             if on_event is not None:
                 await on_event(event)
 
-        return await self._chat_impl(user_message, conversation, _emit, images=images)
+        return await self._chat_impl(user_message, conversation, _emit, on_compact=on_compact, images=images)
 
     async def _chat_impl(
         self,
         user_message: str,
         conversation: list[dict[str, Any]],
         _emit: Callable[[AgentEvent], Awaitable[None]],
+        on_compact: Callable[[str, int], Awaitable[None]] | None = None,
         images: list[dict[str, str]] | None = None,
     ) -> str:
         """Inner chat loop. `conversation` is the caller-owned list that
@@ -933,7 +954,7 @@ class Agent:
 
         # compact the conversation if it's gotten huge
         try:
-            await self._maybe_compact(conversation)
+            await self._maybe_compact(conversation, on_compact=on_compact)
         except Exception:
             logger.exception("compaction failed; continuing with raw conversation")
 

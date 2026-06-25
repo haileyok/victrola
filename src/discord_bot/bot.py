@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 import discord
 
 from src.config import CONFIG
+from src.utils.text import _chunk
 
 if TYPE_CHECKING:
     from src.agent.agent import Agent, AgentEvent
@@ -139,23 +140,6 @@ class _UsageTracker:
             parts.append(f"out {_fmt_tokens(self.output_tokens)}")
         parts.append(f"calls {self.calls}")
         return " · ".join(parts)
-
-
-def _chunk(text: str, limit: int = MAX_CHUNK) -> list[str]:
-    """Split text into <=limit-char chunks, breaking on newlines when possible."""
-    if len(text) <= limit:
-        return [text]
-    chunks: list[str] = []
-    remaining = text
-    while len(remaining) > limit:
-        cut = remaining.rfind("\n", 0, limit)
-        if cut < limit // 2:  # no good break point — hard split
-            cut = limit
-        chunks.append(remaining[:cut])
-        remaining = remaining[cut:].lstrip("\n")
-    if remaining:
-        chunks.append(remaining)
-    return chunks
 
 
 async def _send_chunked(
@@ -347,7 +331,22 @@ class DiscordBot:
         # load the full session conversation for agent context. The agent
         # no longer holds shared conversation state — each call mutates
         # the passed list in place.
-        loaded = await self._load_conversation(thread_id)
+        from src.agent.conversation import ConversationManager
+
+        conv_manager = ConversationManager(
+            ctx=self._executor.ctx, llm_client=self._executor.llm_client
+        )
+        loaded, msg_ids = await conv_manager.load_session_with_ids(thread_id)
+
+        # Persist compaction checkpoints so the summary is reused on reload
+        # instead of re-summarizing from scratch each turn.
+        async def on_compact(summary: str, split_idx: int) -> None:
+            if 0 < split_idx <= len(msg_ids):
+                last_id = msg_ids[split_idx - 1]
+                if last_id >= 0:
+                    await store.chat.set_compaction_checkpoint(
+                        thread_id, last_id, summary
+                    )
 
         tracker = _UsageTracker()
         async with thread.typing():
@@ -355,6 +354,7 @@ class DiscordBot:
                 user_text,
                 conversation=loaded,
                 on_event=tracker.on_event,
+                on_compact=on_compact,
                 images=images or None,
             )
 
@@ -392,34 +392,4 @@ class DiscordBot:
                     logger.exception("Failed to rename Discord thread %s", thread.id)
         except Exception:
             logger.exception("Auto-title generation failed for %s", thread.id)
-
-    async def _load_conversation(self, thread_id: str) -> list[dict[str, Any]]:
-        """Load a session's full message history in agent.chat() format."""
-        store = self._executor.store
-        if store is None or store.chat is None:
-            raise RuntimeError("Store or ChatStore is not initialized")
-
-        messages: list[dict[str, Any]] = []
-        cursor: str | None = None
-        while True:
-            data = await store.chat.list_messages(
-                session_id=thread_id, limit=100, cursor=cursor
-            )
-            records = data.get("messages", [])
-            if not records:
-                break
-            for record in records:
-                content_str = record.get("content", "{}")
-                try:
-                    msg = json.loads(content_str)
-                    messages.append(msg)
-                except (json.JSONDecodeError, TypeError):
-                    messages.append({"role": "user", "content": content_str})
-            cursor = data.get("cursor")
-            if not cursor:
-                break
-        # Drop the most recent user message — agent.chat() will re-append it.
-        if messages and messages[-1].get("role") == "user":
-            messages = messages[:-1]
-        return messages
 

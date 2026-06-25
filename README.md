@@ -245,3 +245,40 @@ You can chat with the agent from Discord in addition to the web interface. Each 
 - Only the agent's final text response appears in the thread. Tool activity (TypeScript the agent writes + tool results) is hidden from Discord to keep threads readable — use the web interface if you want to review that.
 
 The bot only starts when `DISCORD_BOT_TOKEN` is configured. Without it the web interface and scheduler still run normally.
+
+## Signal chat (optional)
+
+You can chat with the agent from Signal in addition to the web interface. Signal becomes the default notification channel when configured — scheduled task results and `notify.send` calls route there automatically.
+
+**Requires `signal-cli-rest-api`** running as an external service. This is a REST wrapper around signal-cli that victrola polls for incoming messages and uses to send responses.
+
+**Setup:**
+
+1. Run signal-cli-rest-api via Docker:
+   ```bash
+   docker run -d \
+     -e MODE=normal \
+     -p 8080:8080 \
+     -v ./signal-cli-config:/home/.local/share/signal-cli \
+     bbernhard/signal-cli-rest-api:latest
+   ```
+   **Do NOT set `AUTO_RECEIVE_SCHEDULE`** — the bot polls `/v1/receive` itself, and the auto-receive schedule would consume messages out from under it, causing permanent message loss.
+
+2. Register a new Signal account (or link to an existing one via QR code). A dedicated phone number for the bot is simplest — see the signal-cli-rest-api docs for registration/linking details.
+
+3. Configure `.env`:
+   ```env
+   SIGNAL_SERVICE=127.0.0.1:8080
+   SIGNAL_BOT_PHONE=+1234567890
+   SIGNAL_OPERATOR_PHONE=+0987654321
+   ```
+
+4. Restart victrola. The bot polls for messages every ~2 seconds and maintains a single persistent chat session (`signal-persistent`) that survives restarts.
+
+**Usage:**
+
+- Send a Signal message to the bot's number — the agent processes it and responds via Signal.
+- The session is persistent: conversation history and compaction state survive restarts.
+- Long responses are chunked into multiple messages at ~1900 chars.
+- Image attachments are supported (ephemeral — not persisted to the conversation store).
+- The agent's `notify.signal` and `notify.send` tools work independently of the chat loop, so you can send notifications even when the bot isn't running.

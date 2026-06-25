@@ -47,22 +47,56 @@ class ConversationManager:
 
     async def load_session(self, session_id: str) -> list[dict[str, Any]]:
         """Load all messages for a session, paginating through all records."""
-        messages: list[dict[str, Any]] = []
-        cursor: str | None = None
+        messages, _ = await self.load_session_with_ids(session_id)
+        return messages
 
+    async def load_session_with_ids(
+        self, session_id: str
+    ) -> tuple[list[dict[str, Any]], list[int]]:
+        """Load messages for a session with compaction checkpoint awareness.
+
+        Returns ``(messages, msg_ids)`` where ``msg_ids[i]`` is the store row
+        ID for ``messages[i]``, or ``-1`` for the synthetic summary message
+        prepended when a compaction checkpoint exists.
+
+        When a checkpoint exists, only the latest summary + messages after the
+        checkpoint are loaded — raw messages covered by the checkpoint are
+        skipped (they remain in the database for auditability).
+        """
         if self._store.chat is None:
             raise RuntimeError("ChatStore is not initialized")
+
+        checkpoint = await self._store.chat.get_compaction_checkpoint(session_id)
+
+        messages: list[dict[str, Any]] = []
+        msg_ids: list[int] = []
+
+        if checkpoint:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"[Conversation summary of earlier messages]\n\n"
+                        f"{checkpoint['summary']}"
+                    ),
+                }
+            )
+            msg_ids.append(-1)
+            after_id = checkpoint["compacted_up_to_msg_id"]
+        else:
+            after_id = 0
+
+        cursor: str | None = None
         while True:
             data = await self._store.chat.list_messages(
                 session_id=session_id,
                 limit=100,
                 cursor=cursor,
+                after_id=after_id,
             )
-
             records = data.get("messages", [])
             if not records:
                 break
-
             for record in records:
                 content_str = record.get("content", "{}")
                 try:
@@ -70,12 +104,21 @@ class ConversationManager:
                     messages.append(msg)
                 except (json.JSONDecodeError, TypeError):
                     messages.append({"role": "user", "content": content_str})
-
+                msg_ids.append(record["id"])
             cursor = data.get("cursor")
             if not cursor:
                 break
 
-        return messages
+        # Drop the most recent user message — agent.chat() will re-append it.
+        # For surfaces that save-before-load (DiscordBot, SignalBot), the
+        # just-saved user message is at the tail and is correctly dropped.
+        # For the web router (load-before-save), the tail is the previous
+        # assistant turn, so this is a no-op.
+        if messages and messages[-1].get("role") == "user":
+            messages = messages[:-1]
+            msg_ids = msg_ids[:-1]
+
+        return messages, msg_ids
 
 
 # Min user-message count in a session before we auto-title it.
