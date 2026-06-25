@@ -188,6 +188,26 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
     }),
+  updateSchedule: (
+    name: string,
+    fields: {
+      schedule?: string;
+      prompt?: string;
+      condition_code?: string;
+      requires_net?: boolean;
+      secrets?: string[];
+    },
+  ) =>
+    fetchJSON<Schedule>(`${API_BASE}/schedules/${enc(name)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(fields),
+    }),
+  runScheduleNow: (name: string) =>
+    fetchJSON<{ fired: boolean; name: string }>(
+      `${API_BASE}/schedules/${enc(name)}/run-now`,
+      { method: "POST" },
+    ),
   testTool: (name: string, params: Record<string, unknown> = {}) =>
     fetchJSON<Record<string, unknown>>(`${API_BASE}/tools/${enc(name)}/test`, {
       method: "POST",
