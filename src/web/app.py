@@ -26,11 +26,13 @@ from src.web.routers import (
 _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 # Hostnames allowed for same-origin requests. Always includes loopback so local
-# access works; the configured bind host is added so requests reaching the server
-# through that address aren't rejected. (0.0.0.0 binds all interfaces and is not
-# a reachable hostname itself, so operators exposing the UI on the LAN should set
-# web_host to the specific address/hostname browsers will use.)
-_ALLOWED_HOSTS = {"localhost", "127.0.0.1", "::1", CONFIG.web_host}
+# access works. The configured bind host is added, plus any extra hostnames the
+# operator lists in WEB_ALLOWED_HOSTS (e.g. a Tailscale host) for cases where
+# the bind is 0.0.0.0 but browsers reach the server via a non-loopback name.
+_EXTRA_HOSTS = {
+    h.strip() for h in CONFIG.web_allowed_hosts.split(",") if h.strip()
+}
+_ALLOWED_HOSTS = {"localhost", "127.0.0.1", "::1", CONFIG.web_host} | _EXTRA_HOSTS
 
 
 class CsrfMiddleware(BaseHTTPMiddleware):

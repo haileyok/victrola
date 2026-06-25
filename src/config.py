@@ -64,6 +64,10 @@ class Config(BaseSettings):
     """host interface the web ui binds to. set to 0.0.0.0 to expose on the LAN."""
     web_port: int = 8000
     """port the web ui listens on."""
+    web_allowed_hosts: str = ""
+    """comma-separated hostnames allowed for same-origin (CSRF) requests, in
+    addition to loopback. Needed when binding 0.0.0.0 and accessing via a
+    non-loopback hostname (e.g. a Tailscale host like 'pikachu')."""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
