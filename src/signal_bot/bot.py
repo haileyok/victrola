@@ -43,7 +43,8 @@ class SignalBot:
     """Long-running Signal bot that polls signal-cli-rest-api for messages.
 
     Polls GET /v1/receive/{phone} every ~2 seconds. Sends responses via
-    POST /v2/send/{phone}. Single persistent chat session with the operator.
+    POST /v2/send with the bot's number in the body. Single persistent
+    chat session with the operator.
     """
 
     def __init__(
@@ -72,7 +73,7 @@ class SignalBot:
         return self._executor.ctx.http_client
 
     def _send_url(self) -> str:
-        return f"{self._base_url}/v2/send/{quote(self._bot_phone, safe='')}"
+        return f"{self._base_url}/v2/send"
 
     def _receive_url(self) -> str:
         return f"{self._base_url}/v1/receive/{quote(self._bot_phone, safe='')}"
@@ -140,11 +141,19 @@ class SignalBot:
         # signal-cli-rest-api wraps messages in an envelope structure
         envelope = msg.get("envelope", msg)
 
-        # Extract sender phone number
-        source = envelope.get("source", "")
+        # Match the operator by any available identifier. For phone-based
+        # accounts `source` is the E.164 number; for username-only accounts
+        # `source` is a UUID and `sourceNumber` is null. Check all three
+        # fields so the operator can be identified by either.
+        sender_ids = {
+            envelope.get("source", ""),
+            envelope.get("sourceNumber", ""),
+            envelope.get("sourceUuid", ""),
+        }
+        sender_ids.discard(None)
+        sender_ids.discard("")
 
-        # Only process messages from the operator
-        if source != self._operator_phone:
+        if self._operator_phone not in sender_ids:
             return
 
         # The text is always in dataMessage regardless of envelope type
@@ -263,6 +272,7 @@ class SignalBot:
                     self._send_url(),
                     json={
                         "message": chunk,
+                        "number": self._bot_phone,
                         "recipients": [self._operator_phone],
                     },
                     timeout=10.0,

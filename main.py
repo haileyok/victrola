@@ -177,7 +177,7 @@ async def _send_default_notification(
         from urllib.parse import quote
 
         bot_phone = quote(CONFIG.signal_bot_phone, safe="")
-        send_url = f"http://{CONFIG.signal_service}/v2/send/{bot_phone}"
+        send_url = f"http://{CONFIG.signal_service}/v2/send"
 
         for chunk in _chunk(message):
             try:
@@ -185,6 +185,7 @@ async def _send_default_notification(
                     send_url,
                     json={
                         "message": chunk,
+                        "number": CONFIG.signal_bot_phone,
                         "recipients": [CONFIG.signal_operator_phone],
                     },
                 )

@@ -83,8 +83,9 @@ async def test_signal_message_handling(signal_bot):
     # Response should have been sent via Signal
     mock_http.post.assert_called()
     send_call = mock_http.post.call_args
-    assert "v2/send/%2B1111111111" in send_call.args[0]
+    assert "v2/send" in send_call.args[0]
     assert send_call.kwargs["json"]["message"] == "agent response"
+    assert send_call.kwargs["json"]["number"] == "+1111111111"
     assert send_call.kwargs["json"]["recipients"] == ["+2222222222"]
 
 
@@ -97,6 +98,28 @@ async def test_signal_filters_non_operator(signal_bot):
 
     agent.chat.assert_not_called()
     mock_http.post.assert_not_called()
+
+
+async def test_signal_matches_operator_by_uuid(signal_bot):
+    """Operator with username-only account is matched via sourceUuid."""
+    bot, agent, store, mock_http = signal_bot
+
+    # Replace the bot's operator_phone with the UUID it should match on
+    bot._operator_phone = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    msg = {
+        "envelope": {
+            "source": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "sourceNumber": None,
+            "sourceUuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "sourceName": "TestOperator",
+            "dataMessage": {"message": "hi from username"},
+        }
+    }
+    await bot._handle_message(msg)
+
+    agent.chat.assert_called_once()
+    assert agent.chat.call_args.args[0] == "hi from username"
 
 
 async def test_signal_empty_message_ignored(signal_bot):
