@@ -856,7 +856,13 @@ class MCPManager:
                 def log_message(self, *args):
                     pass  # suppress default logging
 
-            server = http.server.HTTPServer(("127.0.0.1", 8989), OAuthCallbackHandler)
+            import socket
+
+            class ReusableHTTPServer(http.server.HTTPServer):
+                allow_reuse_address = True
+
+            server = ReusableHTTPServer(("127.0.0.1", 8989), OAuthCallbackHandler)
+            server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             server.timeout = 300  # 5 min timeout
 
             # Run in a thread so we can await
