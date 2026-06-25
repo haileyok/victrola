@@ -81,12 +81,29 @@ async def test_customtool_still_skipped(store):
 
 
 @pytest.mark.asyncio
+async def test_schedule_not_migrated(store):
+    """schedule: docs must not appear in memory_entries."""
+    await _seed_docs(store, {
+        "schedule:daily-check": '{"prompt": "check stuff", "secrets": ["API_KEY"]}',
+        "operator": "Operator is Hailey.",
+    })
+
+    migrated = await migrate_documents_to_memory(store, embedding_client=None)
+    assert migrated == 1
+
+    scopes = await _entry_scopes(store)
+    assert "schedule:daily-check" not in scopes
+    assert "operator" in scopes
+
+
+@pytest.mark.asyncio
 async def test_normal_docs_still_migrated(store):
     """Normal docs (skill, task, free-form) still migrate alongside skipped ones."""
     await _seed_docs(store, {
         "mcptoken:fastmail": '{"access_token": "secret"}',
         "mcpserver:github": '{"transport": "stdio"}',
         "customtool:mytool": '{"definition": "stuff"}',
+        "schedule:daily-check": '{"prompt": "check stuff"}',
         "skill:deploy": "How to deploy the app.",
         "operator": "Operator is Hailey.",
         "self": "I am the agent.",
@@ -99,6 +116,7 @@ async def test_normal_docs_still_migrated(store):
     assert "mcptoken:fastmail" not in scopes
     assert "mcpserver:github" not in scopes
     assert "customtool:mytool" not in scopes
+    assert "schedule:daily-check" not in scopes
     assert "skill:deploy" in scopes
     assert "operator" in scopes
     assert "self" in scopes

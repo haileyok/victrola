@@ -1,10 +1,11 @@
 """One-time migration: agent_documents → memory_entries.
 
 Non-destructive — original rows are left in `agent_documents` as inert
-orphans. Entries with `customtool:`, `mcptoken:`, and `mcpserver:`
-prefixes are skipped: `customtool:*` are managed by `CustomToolManager`,
-and `mcptoken:*` / `mcpserver:*` hold MCP OAuth tokens and server
-configs that must never surface in the searchable memory store.
+orphans. Entries with `customtool:`, `mcptoken:`, `mcpserver:`,
+and `schedule:` prefixes are skipped: `customtool:*` are managed by
+`CustomToolManager`, `mcptoken:*` / `mcpserver:*` hold MCP OAuth tokens
+and server configs, and `schedule:*` holds scheduler task configs — all
+must never surface in the searchable memory store.
 """
 
 import json
@@ -55,6 +56,8 @@ async def migrate_documents_to_memory(
         if rkey.startswith("customtool:"):
             continue
         if rkey.startswith("mcptoken:") or rkey.startswith("mcpserver:"):
+            continue
+        if rkey.startswith("schedule:"):
             continue
 
         # Skip already-migrated rkeys (prevents re-importing stale content
