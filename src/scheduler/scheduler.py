@@ -71,20 +71,28 @@ class Scheduler:
         self._tasks: dict[str, ScheduledTask] = {}
         self._running = False
 
-    def _save(self) -> None:
+    async def _save(self) -> None:
         """Persist all tasks to disk."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        data = [task.to_dict() for task in self._tasks.values()]
-        self._path.write_text(json.dumps(data, indent=2) + "\n")
+        def _write():
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            data = [task.to_dict() for task in self._tasks.values()]
+            self._path.write_text(json.dumps(data, indent=2) + "\n")
+        await asyncio.to_thread(_write)
 
     async def load_tasks(self) -> None:
         """Load all scheduled tasks from the local JSON file."""
         self._tasks.clear()
-        if not self._path.exists():
-            return
+
+        def _read():
+            if not self._path.exists():
+                return None
+            return self._path.read_text()
 
         try:
-            data = json.loads(self._path.read_text())
+            content = await asyncio.to_thread(_read)
+            if content is None:
+                return
+            data = json.loads(content)
             if isinstance(data, list):
                 for entry in data:
                     try:
@@ -114,7 +122,7 @@ class Scheduler:
             task.last_run = datetime.now(timezone.utc).isoformat()
 
         self._tasks[task.name] = task
-        self._save()
+        await self._save()
 
         next_run = task.config.next_run(datetime.now(timezone.utc))
         return f"Schedule '{task.name}' created ({task.config}). Next run: {next_run.strftime('%Y-%m-%d %H:%M UTC')}."
@@ -134,7 +142,7 @@ class Scheduler:
             task._config = None
             _ = task.config
 
-        self._save()
+        await self._save()
         return f"Schedule '{name}' updated."
 
     async def delete_task(self, name: str) -> str:
@@ -143,7 +151,7 @@ class Scheduler:
             return f"Schedule '{name}' not found."
 
         self._tasks.pop(name, None)
-        self._save()
+        await self._save()
         return f"Schedule '{name}' deleted."
 
     async def enable_task(self, name: str) -> str:
@@ -207,7 +215,7 @@ class Scheduler:
                 # Success — advance last_run and reset retry count
                 task.last_run = now.isoformat()
                 task._retry_count = 0
-                self._save()
+                await self._save()
             except Exception:
                 task._retry_count += 1
                 if task._retry_count >= 3:
@@ -219,7 +227,7 @@ class Scheduler:
                     )
                     task.last_run = now.isoformat()
                     task._retry_count = 0
-                    self._save()
+                    await self._save()
                 else:
                     logger.exception(
                         "Schedule '%s' callback failed (attempt %d/3) — "
@@ -230,4 +238,4 @@ class Scheduler:
         else:
             logger.info("Schedule '%s' fired (no callback wired)", task.name)
             task.last_run = now.isoformat()
-            self._save()
+            await self._save()
