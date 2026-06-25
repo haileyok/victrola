@@ -66,8 +66,10 @@ def _server_to_detail(config: MCPServerConfig, manager: Any, sm: Any) -> MCPServ
         url=config.url,
         command=config.command,
         args=config.args,
+        auth_type=config.auth_type,
         auth_token_secret=config.auth_token_secret,
         auth_token_status=auth_status,
+        oauth_status="not_configured",  # set below for async callers
         env_secrets=env_statuses,
         enabled=config.enabled,
         connected=manager.is_connected(config.name),
@@ -80,6 +82,13 @@ def _server_to_detail(config: MCPServerConfig, manager: Any, sm: Any) -> MCPServ
             for t in config.tools
         ],
     )
+
+
+async def _server_to_detail_async(config: MCPServerConfig, manager: Any, sm: Any) -> MCPServerDetail:
+    """Async version that resolves OAuth status."""
+    detail = _server_to_detail(config, manager, sm)
+    detail.oauth_status = await manager.get_oauth_status_async(config.name)
+    return detail
 
 
 @router.get("/servers", response_model=list[MCPServerSummary])
@@ -102,6 +111,7 @@ async def create_server(
         url=body.url,
         command=body.command,
         args=body.args,
+        auth_type=body.auth_type,
         auth_token_secret=body.auth_token_secret,
         env_secrets=body.env_secrets,
         enabled=body.enabled,
@@ -113,7 +123,7 @@ async def create_server(
 
 
 @router.get("/servers/{name}", response_model=MCPServerDetail)
-def get_server(
+async def get_server(
     name: str,
     executor: ToolExecutor = Depends(get_executor),
 ) -> MCPServerDetail:
@@ -122,7 +132,7 @@ def get_server(
     config = mgr.get_server(name)
     if config is None:
         raise HTTPException(404, f"MCP server '{name}' not found")
-    return _server_to_detail(config, mgr, sm)
+    return await _server_to_detail_async(config, mgr, sm)
 
 
 @router.delete("/servers/{name}", status_code=204)
@@ -152,7 +162,7 @@ async def connect_server(
     except Exception as e:
         raise HTTPException(500, f"Failed to connect: {e}")
     config = mgr.get_server(name)
-    return _server_to_detail(config, mgr, sm)
+    return await _server_to_detail_async(config, mgr, sm)
 
 
 @router.post("/servers/{name}/disconnect", response_model=MCPServerDetail)
@@ -167,7 +177,7 @@ async def disconnect_server(
         raise HTTPException(404, f"MCP server '{name}' not found")
     await mgr.disconnect_server(name)
     config = mgr.get_server(name)
-    return _server_to_detail(config, mgr, sm)
+    return await _server_to_detail_async(config, mgr, sm)
 
 
 @router.post("/servers/{name}/refresh", response_model=MCPServerDetail)
@@ -187,7 +197,7 @@ async def refresh_server(
     except Exception as e:
         raise HTTPException(500, f"Failed to refresh tools: {e}")
     config = mgr.get_server(name)
-    return _server_to_detail(config, mgr, sm)
+    return await _server_to_detail_async(config, mgr, sm)
 
 
 @router.post("/servers/{name}/tools/approve")
@@ -219,4 +229,20 @@ async def revoke_tool(
     result = await mgr.revoke_tool(name, body.tool_name)
     if "not found" in result:
         raise HTTPException(404, result)
+    return {"message": result}
+
+
+@router.post("/servers/{name}/oauth/deauthorize")
+async def oauth_deauthorize(
+    name: str,
+    executor: ToolExecutor = Depends(get_executor),
+) -> dict[str, Any]:
+    """Clear stored OAuth tokens so the server can be re-authorized."""
+    mgr = _get_manager(executor)
+    config = mgr.get_server(name)
+    if config is None:
+        raise HTTPException(404, f"MCP server '{name}' not found")
+    if config.auth_type != "oauth":
+        raise HTTPException(400, f"MCP server '{name}' does not use OAuth")
+    result = await mgr.clear_oauth_tokens(name)
     return {"message": result}

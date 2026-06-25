@@ -127,6 +127,7 @@ class CreateMCPServerRequest(BaseModel):
     url: str | None = None
     command: str | None = None
     args: list[str] = []
+    auth_type: Literal["none", "bearer", "oauth"] = "none"
     auth_token_secret: str | None = None
     env_secrets: list[str] = []
     enabled: bool = True
@@ -153,8 +154,10 @@ class MCPServerDetail(BaseModel):
     url: str | None
     command: str | None
     args: list[str]
+    auth_type: str
     auth_token_secret: str | None
     auth_token_status: str  # "set" | "missing" | "none"
+    oauth_status: str  # "not_configured" | "not_authorized" | "authorized" | "unknown"
     env_secrets: list[dict[str, str]]  # [{"name": ..., "status": "set"|"missing"}]
     enabled: bool
     connected: bool

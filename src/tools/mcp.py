@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
+from pydantic import AnyUrl
+
 from src.tools.registry import Tool, ToolParameter
 
 if TYPE_CHECKING:
@@ -96,6 +98,7 @@ class MCPServerConfig:
     url: str | None = None
     command: str | None = None
     args: list[str] = field(default_factory=list)
+    auth_type: Literal["none", "bearer", "oauth"] = "none"
     auth_token_secret: str | None = None
     env_secrets: list[str] = field(default_factory=list)
     enabled: bool = True
@@ -108,6 +111,7 @@ class MCPServerConfig:
             "url": self.url,
             "command": self.command,
             "args": self.args,
+            "auth_type": self.auth_type,
             "auth_token_secret": self.auth_token_secret,
             "env_secrets": self.env_secrets,
             "enabled": self.enabled,
@@ -123,6 +127,7 @@ class MCPServerConfig:
             url=data.get("url"),
             command=data.get("command"),
             args=data.get("args", []),
+            auth_type=data.get("auth_type", data.get("authType", "none")),
             auth_token_secret=data.get("auth_token_secret"),
             env_secrets=data.get("env_secrets", []),
             enabled=data.get("enabled", True),
@@ -138,12 +143,14 @@ class MCPConnection:
     """
 
     def __init__(
-        self, config: MCPServerConfig, secret_manager: SecretManager | None
+        self, config: MCPServerConfig, secret_manager: SecretManager | None,
+        oauth_provider: Any | None = None,
     ) -> None:
         self._config = config
         self._secret_manager = secret_manager
         self._session: Any | None = None
         self._stack: contextlib.AsyncExitStack | None = None
+        self._oauth_provider = oauth_provider
 
     @property
     def is_connected(self) -> bool:
@@ -154,12 +161,17 @@ class MCPConnection:
         self._stack = contextlib.AsyncExitStack()
 
         try:
-            # resolve auth token if configured
+            # resolve auth based on type
             headers: dict[str, str] = {}
-            if self._config.auth_token_secret and self._secret_manager:
+            auth: Any = None
+
+            if self._config.auth_type == "bearer" and self._config.auth_token_secret and self._secret_manager:
                 token = self._secret_manager.get_secret(self._config.auth_token_secret)
                 if token:
                     headers["Authorization"] = f"Bearer {token}"
+            elif self._config.auth_type == "oauth" and self._oauth_provider is not None:
+                # OAuthClientProvider extends httpx.Auth, pass it directly
+                auth = self._oauth_provider
 
             if self._config.transport == "sse":
                 if not self._config.url:
@@ -167,7 +179,7 @@ class MCPConnection:
                 from mcp.client.sse import sse_client
 
                 read, write = await self._stack.enter_async_context(
-                    sse_client(self._config.url, headers=headers or None)
+                    sse_client(self._config.url, headers=headers or None, auth=auth)
                 )
             elif self._config.transport == "stdio":
                 if not self._config.command:
@@ -263,6 +275,52 @@ class MCPConnection:
         return None
 
 
+class MCPOAuthTokenStorage:
+    """Persists OAuth tokens per-server using the DocumentStore.
+
+    Implements the MCP SDK's TokenStorage protocol so it can be passed
+    to OAuthClientProvider. Tokens are stored as JSON documents with
+    the rkey prefix 'mcpoauth:'.
+    """
+
+    def __init__(self, store: Store, server_name: str) -> None:
+        self._store = store
+        self._server_name = server_name
+        self._rkey = f"mcptoken:{server_name}"
+
+    async def get_tokens(self) -> Any:
+        from mcp.shared.auth import OAuthToken
+
+        if self._store.documents is None:
+            return None
+        try:
+            doc = await self._store.documents.get(self._rkey)
+            data = json.loads(doc["content"])
+            return OAuthToken.model_validate(data)
+        except Exception:
+            return None
+
+    async def set_tokens(self, tokens: Any) -> None:
+        if self._store.documents is None:
+            raise RuntimeError("DocumentStore is not initialized")
+        content = json.dumps(tokens.model_dump())
+        try:
+            await self._store.documents.update(self._rkey, content)
+        except Exception:
+            from src.store.store import StoreNotFound
+
+            try:
+                await self._store.documents.create(self._rkey, content)
+            except Exception:
+                logger.warning("Failed to store OAuth tokens for '%s'", self._server_name, exc_info=True)
+
+    async def get_client_info(self) -> Any:
+        return None
+
+    async def set_client_info(self, client_info: Any) -> None:
+        pass  # We don't persist client info — it's regenerated each time
+
+
 class MCPManager:
     """Manages all MCP servers — parallel to CustomToolManager."""
 
@@ -335,7 +393,12 @@ class MCPManager:
         if name in self._connections:
             await self._disconnect_server_impl(name)
 
-        conn = MCPConnection(config, self._secret_manager)
+        # build OAuth provider if needed
+        oauth_provider = None
+        if config.auth_type == "oauth" and config.url:
+            oauth_provider = self._create_oauth_provider(name, config.url)
+
+        conn = MCPConnection(config, self._secret_manager, oauth_provider=oauth_provider)
         await conn.connect()
         self._connections[name] = conn
 
@@ -375,6 +438,16 @@ class MCPManager:
         for name, config in list(self._servers.items()):
             if not config.enabled:
                 continue
+            # Skip OAuth servers that haven't been authorized yet — they need
+            # manual authorization via the web UI (browser redirect flow)
+            if config.auth_type == "oauth":
+                status = await self.get_oauth_status_async(name)
+                if status != "authorized":
+                    logger.info(
+                        "Skipping OAuth MCP server '%s' — not yet authorized "
+                        "(use the web UI to authorize)", name
+                    )
+                    continue
             try:
                 await asyncio.wait_for(self.connect_server(name), timeout=_CONNECT_TIMEOUT)
             except (asyncio.TimeoutError, Exception) as e:
@@ -565,6 +638,15 @@ class MCPManager:
         if config.transport == "stdio" and not config.command:
             return "Error: stdio transport requires a command."
 
+        # backward compat: if auth_token_secret is set but auth_type is "none",
+        # upgrade to "bearer"
+        if config.auth_token_secret and config.auth_type == "none":
+            config.auth_type = "bearer"
+
+        # OAuth only works with SSE transport
+        if config.auth_type == "oauth" and config.transport != "sse":
+            return "Error: OAuth auth_type requires SSE transport."
+
         rkey = f"{MCP_RKEY_PREFIX}{config.name}"
         content = json.dumps(config.to_dict())
         if self._store.documents is None:
@@ -656,7 +738,155 @@ class MCPManager:
         conn = self._connections.get(name)
         return conn is not None and conn.is_connected
 
+    def get_oauth_status(self, name: str) -> str:
+        """Return OAuth authorization status for a server.
+
+        Returns: 'not_configured' | 'not_authorized' | 'authorized' | 'unknown'
+        """
+        config = self._servers.get(name)
+        if config is None or config.auth_type != "oauth":
+            return "not_configured"
+
+        # check if we have stored tokens
+        if self._store.documents is None:
+            return "not_authorized"
+        import asyncio
+
+        async def _check() -> str:
+            rkey = f"mcptoken:{name}"
+            try:
+                await self._store.documents.get(rkey)
+                return "authorized"
+            except Exception:
+                return "not_authorized"
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # We're in an async context — can't easily run async here.
+                # The web layer should call the async version instead.
+                return "unknown"
+            return asyncio.run(_check())
+        except RuntimeError:
+            return "unknown"
+
+    async def get_oauth_status_async(self, name: str) -> str:
+        """Async version of get_oauth_status."""
+        config = self._servers.get(name)
+        if config is None or config.auth_type != "oauth":
+            return "not_configured"
+
+        if self._store.documents is None:
+            return "not_authorized"
+
+        rkey = f"mcptoken:{name}"
+        try:
+            await self._store.documents.get(rkey)
+            return "authorized"
+        except Exception:
+            return "not_authorized"
+
+    async def clear_oauth_tokens(self, name: str) -> str:
+        """Delete stored OAuth tokens for a server (re-authorize)."""
+        config = self._servers.get(name)
+        if config is None:
+            return f"MCP server '{name}' not found."
+
+        rkey = f"mcptoken:{name}"
+        if self._store.documents is None:
+            raise RuntimeError("DocumentStore is not initialized")
+        try:
+            await self._store.documents.delete(rkey)
+        except Exception:
+            pass  # not found is fine
+        return f"OAuth tokens cleared for '{name}'."
+
     # -- internals --
+
+    def _create_oauth_provider(self, server_name: str, server_url: str) -> Any:
+        """Create an OAuthClientProvider for a server.
+
+        The redirect_handler stores the consent URL so the web UI can surface it.
+        The callback_handler runs a local HTTP server to catch the OAuth redirect.
+        """
+        from mcp.client.auth import OAuthClientProvider
+        from mcp.shared.auth import OAuthClientMetadata
+
+        storage = MCPOAuthTokenStorage(self._store, server_name)
+
+        client_metadata = OAuthClientMetadata(
+            client_name="Victrola",
+            redirect_uris=[AnyUrl("http://localhost:8989/callback")],  # type: ignore
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+            token_endpoint_auth_method="none",
+            scope=None,  # let the server tell us what scopes are available
+        )
+
+        # Store the consent URL so the web UI can retrieve it
+        self._oauth_redirect_urls: dict[str, str] = getattr(self, "_oauth_redirect_urls", {})
+
+        async def redirect_handler(url: str) -> None:
+            self._oauth_redirect_urls[server_name] = url
+            logger.info("OAuth consent URL for '%s': %s", server_name, url)
+
+        async def callback_handler() -> tuple[str, str | None]:
+            """Run a local HTTP server to catch the OAuth callback redirect."""
+            import http.server
+            import threading
+            import urllib.parse
+
+            result: dict[str, Any] = {}
+
+            class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
+                def do_GET(self):
+                    parsed = urllib.parse.urlparse(self.path)
+                    params = urllib.parse.parse_qs(parsed.query)
+                    result["code"] = params.get("code", [None])[0]
+                    result["state"] = params.get("state", [None])[0]
+                    result["error"] = params.get("error", [None])[0]
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.end_headers()
+                    if result.get("error"):
+                        self.wfile.write(b"<h1>Authorization failed</h1>")
+                    else:
+                        self.wfile.write(b"<h1>Authorization successful</h1><p>You can close this tab.</p>")
+
+                def log_message(self, *args):
+                    pass  # suppress default logging
+
+            server = http.server.HTTPServer(("127.0.0.1", 8989), OAuthCallbackHandler)
+            server.timeout = 300  # 5 min timeout
+
+            # Run in a thread so we can await
+            def serve():
+                server.handle_request()
+
+            thread = threading.Thread(target=serve, daemon=True)
+            thread.start()
+            thread.join(timeout=305)
+
+            if result.get("error"):
+                raise RuntimeError(f"OAuth authorization error: {result['error']}")
+            if not result.get("code"):
+                raise RuntimeError("OAuth callback did not receive authorization code")
+
+            return result["code"], result.get("state")
+
+        provider = OAuthClientProvider(
+            server_url=server_url,
+            client_metadata=client_metadata,
+            storage=storage,
+            redirect_handler=redirect_handler,
+            callback_handler=callback_handler,
+        )
+        return provider
+
+    def get_oauth_consent_url(self, name: str) -> str | None:
+        """Return the OAuth consent URL if one was generated during connect."""
+        urls = getattr(self, "_oauth_redirect_urls", {})
+        return urls.get(name)
 
     def _register_tool(self, server_name: str, mcp_tool: MCPTool) -> None:
         """Register an MCP tool in the TOOL_REGISTRY."""

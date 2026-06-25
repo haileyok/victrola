@@ -99,8 +99,10 @@ export interface MCPServerDetail {
   url: string | null;
   command: string | null;
   args: string[];
+  auth_type: string;
   auth_token_secret: string | null;
   auth_token_status: string;
+  oauth_status: string;
   env_secrets: { name: string; status: string }[];
   enabled: boolean;
   connected: boolean;
