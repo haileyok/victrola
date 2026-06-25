@@ -266,10 +266,15 @@ class ToolRegistry:
         Prevents heading injection and code fence injection from MCP
         tool descriptions in the system prompt docs.
         """
-        # strip leading # markers that could inject fake headings
-        stripped = text.lstrip("#")
+        lines = text.split("\n")
+        sanitized_lines = []
+        for line in lines:
+            # strip leading # markers that could inject fake headings
+            stripped = line.lstrip("#")
+            sanitized_lines.append(stripped)
+        result = "\n".join(sanitized_lines)
         # neutralize backtick-fenced code blocks
-        return stripped.replace("```", "\\`\\`\\`")
+        return result.replace("```", "\\`\\`\\`")
 
 
 TOOL_REGISTRY = ToolRegistry()

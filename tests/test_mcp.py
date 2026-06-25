@@ -708,7 +708,7 @@ def test_schema_non_dict_property_handled():
 
 
 def test_markdown_sanitization_strips_headings():
-    """_sanitize_md strips leading # and neutralizes code fences."""
+    """_sanitize_md strips leading # on every line and neutralizes code fences."""
     from src.tools.registry import ToolRegistry, Tool
 
     reg = ToolRegistry()
@@ -719,14 +719,101 @@ def test_markdown_sanitization_strips_headings():
     reg.register(
         Tool(
             name="md.test",
-            description="## Fake Heading\n```evil```",
+            description="## Fake Heading\n```evil```\nsafe text\n### Another heading",
             parameters=[],
             handler=handler,
         )
     )
 
     docs = reg.generate_tool_documentation()
-    # Should not contain raw ## heading or ```
+    # Should not contain raw ## headings or ```
     assert "## Fake Heading" not in docs
+    assert "### Another heading" not in docs
     assert "```" not in docs
     reg.unregister("md.test")
+
+
+@pytest.mark.asyncio
+async def test_connect_server_success_with_mocked_connection():
+    """connect_server completes without deadlock when connect + discover succeed."""
+    from pathlib import Path
+    from src.store.store import Store
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    store = Store(path=Path("/tmp/test_mcp_connect_success.db"))
+    await store.initialize()
+    registry = ToolRegistry()
+    manager = MCPManager(store=store, secret_manager=None, registry=registry)
+
+    config = MCPServerConfig(name="mocksrv", transport="sse", url="https://example.com")
+    await manager.create_server(config)
+
+    # Mock MCPConnection so connect succeeds and list_tools returns a tool
+    mock_tool = MagicMock()
+    mock_tool.name = "search"
+    mock_tool.description = "Search"
+    mock_tool.inputSchema = {"type": "object", "properties": {"q": {"type": "string"}}}
+
+    mock_conn = MagicMock()
+    mock_conn.is_connected = True
+    mock_conn.connect = AsyncMock()
+    mock_conn.list_tools = AsyncMock(return_value=[mock_tool])
+    mock_conn.disconnect = AsyncMock()
+
+    with patch("src.tools.mcp.MCPConnection", return_value=mock_conn):
+        await manager.connect_server("mocksrv")
+
+    # connection should be stored
+    assert "mocksrv" in manager._connections
+    # tool should be discovered
+    config = manager.get_server("mocksrv")
+    assert len(config.tools) == 1
+    assert config.tools[0].name == "search"
+    assert config.tools[0].approved is False  # pending
+
+    await manager.disconnect_server("mocksrv")
+    await store.close()
+    import os
+    os.unlink("/tmp/test_mcp_connect_success.db")
+
+
+@pytest.mark.asyncio
+async def test_connect_server_discovery_failure_cleans_up():
+    """connect_server cleans up connection if discover_tools fails after connect."""
+    from pathlib import Path
+    from src.store.store import Store
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    store = Store(path=Path("/tmp/test_mcp_discover_fail.db"))
+    await store.initialize()
+    registry = ToolRegistry()
+    manager = MCPManager(store=store, secret_manager=None, registry=registry)
+
+    config = MCPServerConfig(name="failsrv", transport="sse", url="https://example.com")
+    await manager.create_server(config)
+
+    mock_conn = MagicMock()
+    mock_conn.is_connected = True
+    mock_conn.connect = AsyncMock()
+    mock_conn.list_tools = AsyncMock(side_effect=RuntimeError("discover failed"))
+    mock_conn.disconnect = AsyncMock()
+
+    with patch("src.tools.mcp.MCPConnection", return_value=mock_conn):
+        try:
+            await manager.connect_server("failsrv")
+            assert False, "Should have raised"
+        except RuntimeError:
+            pass  # expected
+
+    # connection should be cleaned up
+    assert "failsrv" not in manager._connections
+    await store.close()
+    import os
+    os.unlink("/tmp/test_mcp_discover_fail.db")
+
+
+def test_schema_top_level_boolean():
+    """A top-level boolean schema (valid JSON Schema) returns empty params."""
+    params, param_map = MCPManager._schema_to_parameters(True)  # type: ignore
+    assert params == []
+    assert param_map == {}

@@ -333,7 +333,7 @@ class MCPManager:
 
         # disconnect existing connection if any
         if name in self._connections:
-            await self.disconnect_server(name)
+            await self._disconnect_server_impl(name)
 
         conn = MCPConnection(config, self._secret_manager)
         await conn.connect()
@@ -341,7 +341,7 @@ class MCPManager:
 
         try:
             # discover tools (updates config.tools)
-            await self.discover_tools(name)
+            await self._discover_tools_impl(name)
 
             # register any previously-approved tools
             for tool in config.tools:
@@ -350,7 +350,7 @@ class MCPManager:
         except BaseException:
             # Clean up the connection if discovery or registration failed
             # so we don't leave a live session with no tools registered.
-            await self.disconnect_server(name)
+            await self._disconnect_server_impl(name)
             raise
 
     async def disconnect_server(self, name: str) -> None:
@@ -453,10 +453,10 @@ class MCPManager:
                 )
             new_tools.append(new_tool)
 
-        # for tools that disappeared from the server
-        new_names = {t.name for t in server_tools}
+        # for tools that disappeared from the server or were skipped due to collision
+        retained_names = {t.name for t in new_tools}
         for old_tool in config.tools:
-            if old_tool.name not in new_names and old_tool.approved:
+            if old_tool.name not in retained_names and old_tool.approved:
                 self._registry.unregister(
                     f"{name}.{self._sanitize_tool_name(old_tool.name)}"
                 )
@@ -584,25 +584,34 @@ class MCPManager:
 
     async def update_server(self, name: str, **fields: Any) -> str:
         """Update an existing server config. Reconnects if connection-affecting fields change."""
-        config = self._servers.get(name)
-        if config is None:
-            return f"MCP server '{name}' not found."
+        async with self._get_lock(name):
+            config = self._servers.get(name)
+            if config is None:
+                return f"MCP server '{name}' not found."
 
-        connection_fields = {"transport", "url", "command", "args", "auth_token_secret", "env_secrets"}
-        needs_reconnect = False
-        was_connected = name in self._connections
+            connection_fields = {"transport", "url", "command", "args", "auth_token_secret", "env_secrets"}
+            needs_reconnect = False
+            was_connected = name in self._connections
 
-        for key, value in fields.items():
-            if value is None:
-                continue
-            if key in connection_fields and getattr(config, key) != value:
-                needs_reconnect = True
-            if hasattr(config, key):
-                setattr(config, key, value)
+            for key, value in fields.items():
+                if value is None:
+                    continue
+                if key in connection_fields and getattr(config, key) != value:
+                    needs_reconnect = True
+                if hasattr(config, key):
+                    setattr(config, key, value)
 
-        await self._persist_server(name)
+            await self._persist_server(name)
 
-        if needs_reconnect and was_connected:
+            if needs_reconnect and was_connected:
+                # disconnect old connection under the current lock
+                if name in self._connections:
+                    await self._disconnect_server_impl(name)
+            else:
+                needs_reconnect = False
+
+        # reconnect outside the lock (connect_server acquires it)
+        if needs_reconnect:
             try:
                 await self.connect_server(name)
             except Exception as e:
@@ -613,23 +622,24 @@ class MCPManager:
 
     async def delete_server(self, name: str) -> str:
         """Delete a server — disconnects and unregisters tools first."""
-        config = self._servers.get(name)
-        if config is None:
-            return f"MCP server '{name}' not found."
+        async with self._get_lock(name):
+            config = self._servers.get(name)
+            if config is None:
+                return f"MCP server '{name}' not found."
 
-        # disconnect (also unregisters tools)
-        if name in self._connections:
-            await self.disconnect_server(name)
+            # disconnect (also unregisters tools)
+            if name in self._connections:
+                await self._disconnect_server_impl(name)
 
-        rkey = f"{MCP_RKEY_PREFIX}{name}"
-        if self._store.documents is None:
-            raise RuntimeError("DocumentStore is not initialized")
-        try:
-            await self._store.documents.delete(rkey)
-        except Exception:
-            logger.exception("Failed to delete MCP server doc %s", rkey)
+            rkey = f"{MCP_RKEY_PREFIX}{name}"
+            if self._store.documents is None:
+                raise RuntimeError("DocumentStore is not initialized")
+            try:
+                await self._store.documents.delete(rkey)
+            except Exception:
+                logger.exception("Failed to delete MCP server doc %s", rkey)
 
-        self._servers.pop(name, None)
+            self._servers.pop(name, None)
         return f"MCP server '{name}' deleted."
 
     # -- read-only accessors --
@@ -685,6 +695,9 @@ class MCPManager:
         Returns (params, mapping) where mapping is sanitized_name -> original_name.
         Sanitized names are made unique with numeric suffixes if collisions occur.
         """
+        if not isinstance(schema, dict):
+            return [], {}
+
         props = schema.get("properties", {})
         required = set(schema.get("required", []))
         type_map = {
