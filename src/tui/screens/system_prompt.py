@@ -50,11 +50,11 @@ class SystemPromptScreen(Screen):
         # not whatever was cached at boot.
         text: str
         try:
-            provider = getattr(agent, "_system_prompt_provider", None)
+            provider = agent.system_prompt_provider
             if provider is not None:
                 text = await provider()
             else:
-                text = getattr(agent, "_system_prompt", None) or "(no prompt set)"
+                text = agent.system_prompt or "(no prompt set)"
         except Exception as e:
             logger.exception("Failed to fetch current system prompt")
             text = f"(error fetching prompt: {e})"

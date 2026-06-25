@@ -85,7 +85,7 @@ class SessionListScreen(Screen):
 
     def _chat_store(self) -> Any:
         executor = self.app.executor  # type: ignore[attr-defined]
-        store = getattr(executor._ctx, "_store", None)
+        store = executor.store
         if store is None:
             return None
         return store.chat

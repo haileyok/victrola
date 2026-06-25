@@ -73,18 +73,16 @@ class VictrolaApp(App):
             async def _refresh_prompt() -> str:
                 return await _load_system_prompt(self.executor._ctx, self.executor)
 
-            self.agent._system_prompt_provider = _refresh_prompt
-            self.agent._system_prompt = await _refresh_prompt()
+            self.agent.system_prompt_provider = _refresh_prompt
+            self.agent.system_prompt = await _refresh_prompt()
             logger.info("System prompt loaded")
         except Exception:
             logger.exception("System prompt load failed")
 
         # wire scheduler callback and start in background
-        if self.executor._scheduler:
-            import asyncio
-
-            self.executor._scheduler._on_fire = self._on_schedule_fire
-            asyncio.create_task(self.executor._scheduler.run())
+        if self.executor.scheduler:
+            self.executor.scheduler._on_fire = self._on_schedule_fire
+            asyncio.create_task(self.executor.scheduler.run())
             logger.info("Scheduler started in background")
 
         # start Discord chat bot if DISCORD_BOT_TOKEN is configured

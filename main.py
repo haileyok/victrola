@@ -100,19 +100,19 @@ def build_services(
 
 def _wire_scheduler(executor: ToolExecutor, agent: Agent) -> None:
     """Wire the scheduler callback to the agent after initialization."""
-    if executor._scheduler is not None:
+    if executor.scheduler is not None:
 
         async def on_schedule_fire(task_name: str, prompt: str) -> str:
             return await agent.chat(
                 f"[Scheduled task: {task_name}] {prompt}", conversation=[]
             )
 
-        executor._scheduler._on_fire = on_schedule_fire
+        executor.scheduler._on_fire = on_schedule_fire
 
 
 def _build_discord_bot(executor: ToolExecutor, agent: Agent):
     """Return a DiscordBot if DISCORD_BOT_TOKEN is configured, else None."""
-    sm = getattr(executor, "_secret_manager", None)
+    sm = executor.secret_manager
     if sm is None:
         return None
     from src.discord_bot.bot import DISCORD_TOKEN_SECRET, DiscordBot
@@ -193,13 +193,13 @@ async def _load_system_prompt(tool_context: ToolContext, executor: ToolExecutor)
 
     # collect available secret names for the system prompt
     secret_names: list[str] = []
-    if executor._secret_manager:
-        secret_names = executor._secret_manager.list_secret_names()
+    if executor.secret_manager:
+        secret_names = executor.secret_manager.list_secret_names()
 
     # build compact custom tools list for the system prompt
     custom_tools_list = ""
-    if executor._custom_tool_manager is not None:
-        approved = executor._custom_tool_manager.get_approved_tools()
+    if executor.custom_tool_manager is not None:
+        approved = executor.custom_tool_manager.get_approved_tools()
         if approved:
             lines = []
             for t in approved:
@@ -243,14 +243,14 @@ def main(
         async def _refresh_prompt() -> str:
             return await _load_system_prompt(executor._ctx, executor)
 
-        agent._system_prompt_provider = _refresh_prompt
-        agent._system_prompt = await _refresh_prompt()
+        agent.system_prompt_provider = _refresh_prompt
+        agent.system_prompt = await _refresh_prompt()
 
         discord_bot = _build_discord_bot(executor, agent)
 
         async with asyncio.TaskGroup() as tg:
-            if executor._scheduler:
-                tg.create_task(executor._scheduler.run())
+            if executor.scheduler:
+                tg.create_task(executor.scheduler.run())
             if discord_bot is not None:
                 tg.create_task(discord_bot.start())
 
@@ -281,8 +281,8 @@ def chat(
         async def _refresh_prompt() -> str:
             return await _load_system_prompt(executor._ctx, executor)
 
-        agent._system_prompt_provider = _refresh_prompt
-        agent._system_prompt = await _refresh_prompt()
+        agent.system_prompt_provider = _refresh_prompt
+        agent.system_prompt = await _refresh_prompt()
         logger.info("Services initialized. Starting interactive chat.")
         print("\nAgent ready. Type your message (Ctrl+C to exit).\n")
 
