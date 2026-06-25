@@ -260,9 +260,12 @@ const params = {params_json};
     ) -> dict[str, Any]:
         """Shared logic for processing deno subprocess output."""
 
-        assert process.stdin is not None
-        assert process.stdout is not None
-        assert process.stderr is not None
+        if process.stdin is None:
+            raise RuntimeError("Process stdin is not available")
+        if process.stdout is None:
+            raise RuntimeError("Process stdout is not available")
+        if process.stderr is None:
+            raise RuntimeError("Process stderr is not available")
 
         outputs: list[Any] = []
         debug_messages: list[str] = []

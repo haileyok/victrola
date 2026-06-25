@@ -63,7 +63,8 @@ class Store:
             self._db = None
 
     async def _create_schema(self) -> None:
-        assert self._db is not None
+        if self._db is None:
+            raise RuntimeError("Database connection not initialized")
         await self._db.executescript(
             """
             CREATE TABLE IF NOT EXISTS agent_documents (
