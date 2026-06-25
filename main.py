@@ -237,22 +237,25 @@ def main(
     )
 
     async def run():
-        await executor.initialize()
-        _wire_scheduler(executor, agent)
+        try:
+            await executor.initialize()
+            _wire_scheduler(executor, agent)
 
-        async def _refresh_prompt() -> str:
-            return await _load_system_prompt(executor._ctx, executor)
+            async def _refresh_prompt() -> str:
+                return await _load_system_prompt(executor._ctx, executor)
 
-        agent.system_prompt_provider = _refresh_prompt
-        agent.system_prompt = await _refresh_prompt()
+            agent.system_prompt_provider = _refresh_prompt
+            agent.system_prompt = await _refresh_prompt()
 
-        discord_bot = _build_discord_bot(executor, agent)
+            discord_bot = _build_discord_bot(executor, agent)
 
-        async with asyncio.TaskGroup() as tg:
-            if executor.scheduler:
-                tg.create_task(executor.scheduler.run())
-            if discord_bot is not None:
-                tg.create_task(discord_bot.start())
+            async with asyncio.TaskGroup() as tg:
+                if executor.scheduler:
+                    tg.create_task(executor.scheduler.run())
+                if discord_bot is not None:
+                    tg.create_task(discord_bot.start())
+        finally:
+            await agent.aclose()
 
     try:
         asyncio.run(run())
@@ -276,29 +279,32 @@ def chat(
     )
 
     async def run():
-        await executor.initialize()
+        try:
+            await executor.initialize()
 
-        async def _refresh_prompt() -> str:
-            return await _load_system_prompt(executor._ctx, executor)
+            async def _refresh_prompt() -> str:
+                return await _load_system_prompt(executor._ctx, executor)
 
-        agent.system_prompt_provider = _refresh_prompt
-        agent.system_prompt = await _refresh_prompt()
-        logger.info("Services initialized. Starting interactive chat.")
-        print("\nAgent ready. Type your message (Ctrl+C to exit).\n")
+            agent.system_prompt_provider = _refresh_prompt
+            agent.system_prompt = await _refresh_prompt()
+            logger.info("Services initialized. Starting interactive chat.")
+            print("\nAgent ready. Type your message (Ctrl+C to exit).\n")
 
-        conversation: list[dict[str, Any]] = []
-        while True:
-            try:
-                user_input = input("You: ")
-            except EOFError:
-                break
+            conversation: list[dict[str, Any]] = []
+            while True:
+                try:
+                    user_input = input("You: ")
+                except EOFError:
+                    break
 
-            if not user_input.strip():
-                continue
+                if not user_input.strip():
+                    continue
 
-            logger.info("User: %s", user_input)
-            response = await agent.chat(user_input, conversation=conversation)
-            print(f"\nAgent: {response}\n")
+                logger.info("User: %s", user_input)
+                response = await agent.chat(user_input, conversation=conversation)
+                print(f"\nAgent: {response}\n")
+        finally:
+            await agent.aclose()
 
     try:
         asyncio.run(run())
