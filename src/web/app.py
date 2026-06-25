@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from src.config import CONFIG
 from src.web.routers import (
     chat,
     schedules,
@@ -24,19 +25,23 @@ from src.web.routers import (
 # to prevent CSRF attacks from malicious cross-origin pages.
 _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
-# Hostnames allowed for same-origin requests (the server binds to 127.0.0.1).
-_ALLOWED_HOSTS = {"localhost", "127.0.0.1", "::1"}
+# Hostnames allowed for same-origin requests. Always includes loopback so local
+# access works; the configured bind host is added so requests reaching the server
+# through that address aren't rejected. (0.0.0.0 binds all interfaces and is not
+# a reachable hostname itself, so operators exposing the UI on the LAN should set
+# web_host to the specific address/hostname browsers will use.)
+_ALLOWED_HOSTS = {"localhost", "127.0.0.1", "::1", CONFIG.web_host}
 
 
 class CsrfMiddleware(BaseHTTPMiddleware):
     """Reject cross-origin state-changing requests.
 
-    The server listens on 127.0.0.1, so only local browser pages can reach it.
-    But a malicious website the operator visits could submit cross-origin POSTs
-    to e.g. /api/tools/<name>/approve. This middleware blocks that by checking
-    the Origin header on unsafe methods — if present, the hostname must be
-    a local address. We use urlparse to avoid prefix-matching bypasses like
-    http://localhost.evil.com.
+    Only same-origin requests (Origin hostname matching the configured bind host
+    or a loopback address) are permitted on unsafe methods. A malicious website
+    the operator visits could otherwise submit cross-origin POSTs to e.g.
+    /api/tools/<name>/approve. This middleware blocks that by checking the Origin
+    header on unsafe methods — if present, the hostname must be in _ALLOWED_HOSTS.
+    We use urlparse to avoid prefix-matching bypasses like http://localhost.evil.com.
     """
 
     async def dispatch(self, request: Request, call_next):

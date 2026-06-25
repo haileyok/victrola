@@ -59,6 +59,12 @@ class Config(BaseSettings):
     embedding_dimensions: int = 768
     """dimensionality of the embedding model"""
 
+    # web ui
+    web_host: str = "127.0.0.1"
+    """host interface the web ui binds to. set to 0.0.0.0 to expose on the LAN."""
+    web_port: int = 8000
+    """port the web ui listens on."""
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

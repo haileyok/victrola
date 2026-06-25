@@ -398,8 +398,8 @@ def serve(
                     tg.create_task(discord_bot.start())
                 config = uvicorn.Config(
                     create_app(agent, executor, conversation_manager),
-                    host="127.0.0.1",
-                    port=8000,
+                    host=CONFIG.web_host,
+                    port=CONFIG.web_port,
                     log_level="info",
                 )
                 server = uvicorn.Server(config)
