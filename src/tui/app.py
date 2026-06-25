@@ -98,6 +98,13 @@ class VictrolaApp(App):
 
         self.push_screen(SessionListScreen())
 
+    async def on_unmount(self) -> None:
+        """Clean up resources on shutdown."""
+        try:
+            await self.agent.aclose()
+        except Exception:
+            logger.exception("Failed to close agent on unmount")
+
     async def _on_schedule_fire(self, task_name: str, prompt: str) -> str:
         """Handle a scheduled task firing. Creates a dedicated chat session,
         runs the agent in an isolated conversation, and saves messages."""
