@@ -372,7 +372,8 @@ class DiscordBot:
     async def _load_conversation(self, thread_id: str) -> list[dict[str, Any]]:
         """Load a session's full message history in agent.chat() format."""
         store = self._executor._ctx._store
-        assert store is not None and store.chat is not None
+        if store is None or store.chat is None:
+            raise RuntimeError("Store or ChatStore is not initialized")
 
         messages: list[dict[str, Any]] = []
         cursor: str | None = None

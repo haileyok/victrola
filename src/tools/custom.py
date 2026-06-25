@@ -70,7 +70,8 @@ class CustomToolManager:
         cursor: str | None = None
 
         while True:
-            assert self._store.documents is not None
+            if self._store.documents is None:
+            raise RuntimeError("DocumentStore is not initialized")
             resp = await self._store.documents.list(limit=100, cursor=cursor)
             documents = resp.get("documents", [])
 
@@ -152,7 +153,8 @@ class CustomToolManager:
         """Create a new custom tool in the local store."""
         rkey = f"{TOOL_RKEY_PREFIX}{tool.name}"
         content = json.dumps(tool.to_dict())
-        assert self._store.documents is not None
+        if self._store.documents is None:
+            raise RuntimeError("DocumentStore is not initialized")
 
         try:
             await self._store.documents.create(rkey, content)
@@ -185,7 +187,8 @@ class CustomToolManager:
 
         rkey = f"{TOOL_RKEY_PREFIX}{name}"
         content = json.dumps(tool.to_dict())
-        assert self._store.documents is not None
+        if self._store.documents is None:
+            raise RuntimeError("DocumentStore is not initialized")
         await self._store.documents.update(rkey, content)
         return f"Custom tool '{name}' updated." + (
             " Approval reset." if resets_approval else ""
@@ -198,7 +201,8 @@ class CustomToolManager:
             return f"Custom tool '{name}' not found."
 
         rkey = f"{TOOL_RKEY_PREFIX}{name}"
-        assert self._store.documents is not None
+        if self._store.documents is None:
+            raise RuntimeError("DocumentStore is not initialized")
         try:
             await self._store.documents.delete(rkey)
         except Exception:
@@ -216,7 +220,8 @@ class CustomToolManager:
         tool.approved = True
         rkey = f"{TOOL_RKEY_PREFIX}{name}"
         content = json.dumps(tool.to_dict())
-        assert self._store.documents is not None
+        if self._store.documents is None:
+            raise RuntimeError("DocumentStore is not initialized")
         await self._store.documents.update(rkey, content)
         return f"Custom tool '{name}' approved."
 
@@ -229,6 +234,7 @@ class CustomToolManager:
         tool.approved = False
         rkey = f"{TOOL_RKEY_PREFIX}{name}"
         content = json.dumps(tool.to_dict())
-        assert self._store.documents is not None
+        if self._store.documents is None:
+            raise RuntimeError("DocumentStore is not initialized")
         await self._store.documents.update(rkey, content)
         return f"Custom tool '{name}' approval revoked."

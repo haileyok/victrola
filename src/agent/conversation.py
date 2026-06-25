@@ -37,7 +37,8 @@ class ConversationManager:
 
         payload = json.dumps({"role": role, "content": content}, default=str)
 
-        assert self._store.chat is not None
+        if self._store.chat is None:
+            raise RuntimeError("ChatStore is not initialized")
         await self._store.chat.create_message(
             session_id=session_id,
             sender=role,
@@ -49,7 +50,8 @@ class ConversationManager:
         messages: list[dict[str, Any]] = []
         cursor: str | None = None
 
-        assert self._store.chat is not None
+        if self._store.chat is None:
+            raise RuntimeError("ChatStore is not initialized")
         while True:
             data = await self._store.chat.list_messages(
                 session_id=session_id,
@@ -96,7 +98,8 @@ async def maybe_generate_session_title(
     """
     if llm_client is None:
         return None
-    assert store.chat is not None
+    if store.chat is None:
+        raise RuntimeError("ChatStore is not initialized")
 
     session = await store.chat.get_session(session_id)
     if session is None or session.get("title"):
@@ -150,7 +153,8 @@ async def maybe_generate_session_title(
         title = title[:TITLE_MAX_LEN].rstrip() + "..."
 
     try:
-        assert store.chat is not None
+        if store.chat is None:
+            raise RuntimeError("ChatStore is not initialized")
         await store.chat.set_title(session_id, title)
     except Exception:
         logger.exception("failed to persist title for session %s", session_id)

@@ -63,7 +63,8 @@ class Store:
             self._db = None
 
     async def _create_schema(self) -> None:
-        assert self._db is not None
+        if self._db is None:
+            raise RuntimeError("Database connection not initialized")
         await self._db.executescript(
             """
             CREATE TABLE IF NOT EXISTS agent_documents (
@@ -346,7 +347,8 @@ class ChatStore:
         )
         await self._db.commit()
         existing = await self.get_session(rkey)
-        assert existing is not None
+        if existing is None:
+            raise RuntimeError("ensure_session failed: session not found after create")
         return existing
 
     async def list_sessions(

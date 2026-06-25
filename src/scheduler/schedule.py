@@ -86,7 +86,8 @@ class ScheduleConfig:
 
         match self.type:
             case "interval" | "hourly":
-                assert self.interval is not None
+                if self.interval is None:
+                    raise RuntimeError("interval is not set for interval/hourly schedule")
                 return from_time + self.interval
 
             case "daily":

@@ -454,20 +454,24 @@ class Agent:
     ) -> None:
         match model_api:
             case "anthropic":
-                assert model_api_key
+                if not model_api_key:
+                    raise ValueError("model_api_key is required for anthropic")
                 self._client: AgentClient = AnthropicClient(
                     api_key=model_api_key, model_name=model_name
                 )
             case "openai":
-                assert model_api_key
+                if not model_api_key:
+                    raise ValueError("model_api_key is required for openai")
                 self._client = OpenAICompatibleClient(
                     api_key=model_api_key,
                     model_name=model_name,
                     endpoint="https://api.openai.com/v1",
                 )
             case "openapi":
-                assert model_api_key
-                assert model_endpoint, "model_endpoint is required for openapi"
+                if not model_api_key:
+                    raise ValueError("model_api_key is required for openapi")
+                if not model_endpoint:
+                    raise ValueError("model_endpoint is required for openapi")
                 self._client = OpenAICompatibleClient(
                     api_key=model_api_key,
                     model_name=model_name,

@@ -8,7 +8,8 @@ logger = logging.getLogger(__name__)
 
 async def _get_note(ctx: ToolContext, rkey: str) -> dict[str, Any] | None:
     """Fetch a note by rkey, returning None if not found."""
-    assert ctx.store.documents is not None
+    if ctx.store.documents is None:
+        raise RuntimeError("DocumentStore is not initialized")
     try:
         return await ctx.store.documents.get(rkey)
     except Exception as e:
@@ -74,7 +75,8 @@ async def note_upsert(
         return "Error: content is required"
 
     docs = ctx.store.documents
-    assert docs is not None
+    if docs is None:
+        raise RuntimeError("DocumentStore is not initialized")
 
     existed = False
     existing_content = ""
@@ -169,7 +171,8 @@ async def note_list(
     if limit > 100:
         limit = 100
 
-    assert ctx.store.documents is not None
+    if ctx.store.documents is None:
+        raise RuntimeError("DocumentStore is not initialized")
     resp = await ctx.store.documents.list(limit=limit, cursor=cursor)
 
     documents = resp.get("documents", [])
