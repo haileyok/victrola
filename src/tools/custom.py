@@ -147,7 +147,7 @@ class CustomToolManager:
             for secret_name in tool.secrets:
                 val = self._secret_manager.get_secret(secret_name)
                 if val:
-                    env[secret_name.upper()] = val
+                    env[secret_name] = val
 
         return env
 
