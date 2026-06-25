@@ -279,8 +279,8 @@ export function MCPServerDetail() {
           {/* Config */}
           <div className="mb-6 space-y-2">
             <div className="text-xs font-medium text-muted-foreground">Configuration</div>
-            {server.transport === "sse" ? (
-              <div className="text-sm">
+            {server.transport === "sse" || server.transport === "streamable_http" ? (
+              <div className="text-sm break-all">
                 <span className="text-muted-foreground">URL: </span>
                 <code className="rounded bg-muted px-1.5 py-0.5">{server.url || "—"}</code>
               </div>
@@ -365,20 +365,20 @@ export function MCPServerDetail() {
                 {server.tools.map((tool) => (
                   <div
                     key={tool.name}
-                    className="group flex items-center gap-3 rounded-md px-3 py-2 hover:bg-accent"
+                    className="group flex items-start gap-3 rounded-md px-3 py-2 hover:bg-accent"
                   >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <code className="text-sm font-medium">{tool.name}</code>
+                    <div className="min-w-0 flex-1 overflow-hidden">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <code className="text-sm font-medium break-all">{tool.name}</code>
                         {tool.approved ? (
-                          <Badge className="bg-green-600 text-white">approved</Badge>
+                          <Badge className="bg-green-600 text-white shrink-0">approved</Badge>
                         ) : (
-                          <Badge variant="secondary" className="bg-yellow-600 text-white">pending</Badge>
+                          <Badge variant="secondary" className="bg-yellow-600 text-white shrink-0">pending</Badge>
                         )}
                       </div>
-                      <div className="truncate text-xs text-muted-foreground">{tool.description}</div>
+                      <div className="text-xs text-muted-foreground break-words mt-0.5">{tool.description}</div>
                     </div>
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100">
+                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 shrink-0">
                       {!tool.approved && (
                         <Button
                           variant="ghost"
