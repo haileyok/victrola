@@ -208,6 +208,23 @@ class DiscordBot:
         self._agent = agent
         self._executor = executor
 
+        # Parse the allowlist of Discord user IDs
+        raw_ids = CONFIG.discord_allowed_user_ids.strip()
+        if raw_ids:
+            self._allowed_user_ids: set[int] | None = {
+                int(uid.strip()) for uid in raw_ids.split(",") if uid.strip()
+            }
+            logger.info(
+                "Discord allowlist active: %d user(s) permitted",
+                len(self._allowed_user_ids),
+            )
+        else:
+            self._allowed_user_ids = None
+            logger.warning(
+                "DISCORD_ALLOWED_USER_IDS is not set — all Discord users can "
+                "drive the agent. Set this in .env to restrict access."
+            )
+
         intents = discord.Intents.default()
         intents.message_content = True  # privileged; must also be enabled on Dev Portal
         self._client = discord.Client(intents=intents)
@@ -235,6 +252,16 @@ class DiscordBot:
         # Ignore self and other bots
         if message.author == self._client.user or message.author.bot:
             return
+
+        # Check allowlist if configured
+        if self._allowed_user_ids is not None:
+            if message.author.id not in self._allowed_user_ids:
+                logger.info(
+                    "Ignoring message from non-allowlisted user %s (id=%s)",
+                    message.author,
+                    message.author.id,
+                )
+                return
 
         thread = await self._resolve_thread(message)
         if thread is None:

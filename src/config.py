@@ -36,6 +36,13 @@ class Config(BaseSettings):
     discord_sessions_channel: str = "victrola-sessions"
     """name of the text channel the Discord bot watches for chat sessions"""
 
+    discord_allowed_user_ids: str = ""
+    """comma-separated Discord user IDs allowed to drive the agent via Discord.
+    If empty, all users are allowed (with a startup warning)."""
+
+    discord_chat_timeout_seconds: int = 300
+    """timeout in seconds for agent.chat() calls from the Discord bot"""
+
     # exa web search
     exa_api_key: str = ""
     """api key for Exa web search"""
