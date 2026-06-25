@@ -158,6 +158,17 @@ async def connect_server(
     config = mgr.get_server(name)
     if config is None:
         raise HTTPException(404, f"MCP server '{name}' not found")
+
+    # For OAuth servers, run connect in the background so the request doesn't block
+    # while waiting for the operator to complete the consent flow
+    if config.auth_type == "oauth":
+        import asyncio
+        asyncio.create_task(mgr.connect_server(name))
+        # Give it a moment to generate the consent URL
+        await asyncio.sleep(0.5)
+        config = mgr.get_server(name)
+        return await _server_to_detail_async(config, mgr, sm)
+
     try:
         await mgr.connect_server(name)
     except Exception as e:

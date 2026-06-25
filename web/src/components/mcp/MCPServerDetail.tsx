@@ -48,27 +48,17 @@ export function MCPServerDetail() {
     setOauthConsentUrl(null);
     setOauthPending(false);
     try {
-      // For OAuth servers, the connect may fail with 500 because it's waiting
-      // for the callback. We catch that and check for a pending consent URL.
-      try {
-        setServer(await api.connectMCPServer(name));
-      } catch (e) {
-        // Check if there's a pending OAuth flow
-        if (server?.auth_type === "oauth") {
-          try {
-            const oauthInfo = await api.getOAuthConsentUrl(name);
-            if (oauthInfo.consent_url) {
-              setOauthConsentUrl(oauthInfo.consent_url);
-              setOauthPending(oauthInfo.pending_callback);
-              // Poll for completion
-              pollOAuthStatus();
-              return;
-            }
-          } catch {
-            // ignore
-          }
+      const result = await api.connectMCPServer(name);
+      setServer(result);
+
+      // For OAuth servers, check if a consent URL was generated
+      if (result.auth_type === "oauth" && !result.connected) {
+        const oauthInfo = await api.getOAuthConsentUrl(name);
+        if (oauthInfo.consent_url) {
+          setOauthConsentUrl(oauthInfo.consent_url);
+          setOauthPending(true);
+          pollOAuthStatus();
         }
-        throw e;
       }
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Failed to connect");
