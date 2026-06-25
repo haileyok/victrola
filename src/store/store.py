@@ -116,6 +116,7 @@ class DocumentStore:
     async def create(self, rkey: str, content: str) -> dict[str, Any]:
         now = _now()
         try:
+            await self._db.execute("BEGIN IMMEDIATE")
             await self._db.execute(
                 "INSERT INTO agent_documents (rkey, content, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?)",
@@ -123,18 +124,30 @@ class DocumentStore:
             )
             await self._db.commit()
         except aiosqlite.IntegrityError as e:
+            await self._db.rollback()
             raise StoreNotFound(f"agent_document '{rkey}' already exists") from e
+        except Exception:
+            await self._db.rollback()
+            raise
         return {"rkey": rkey, "content": content, "createdAt": now, "updatedAt": now}
 
     async def update(self, rkey: str, content: str) -> dict[str, Any]:
         now = _now()
-        cur = await self._db.execute(
-            "UPDATE agent_documents SET content = ?, updated_at = ? WHERE rkey = ?",
-            (content, now, rkey),
-        )
-        if cur.rowcount == 0:
-            raise StoreNotFound(f"agent_document '{rkey}' not found")
-        await self._db.commit()
+        try:
+            await self._db.execute("BEGIN IMMEDIATE")
+            cur = await self._db.execute(
+                "UPDATE agent_documents SET content = ?, updated_at = ? WHERE rkey = ?",
+                (content, now, rkey),
+            )
+            if cur.rowcount == 0:
+                await self._db.rollback()
+                raise StoreNotFound(f"agent_document '{rkey}' not found")
+            await self._db.commit()
+        except StoreNotFound:
+            raise
+        except Exception:
+            await self._db.rollback()
+            raise
         return {"rkey": rkey, "content": content, "updatedAt": now}
 
     async def get(self, rkey: str) -> dict[str, Any]:
@@ -188,12 +201,20 @@ class DocumentStore:
         return out
 
     async def delete(self, rkey: str) -> None:
-        cur = await self._db.execute(
-            "DELETE FROM agent_documents WHERE rkey = ?", (rkey,)
-        )
-        if cur.rowcount == 0:
-            raise StoreNotFound(f"agent_document '{rkey}' not found")
-        await self._db.commit()
+        try:
+            await self._db.execute("BEGIN IMMEDIATE")
+            cur = await self._db.execute(
+                "DELETE FROM agent_documents WHERE rkey = ?", (rkey,)
+            )
+            if cur.rowcount == 0:
+                await self._db.rollback()
+                raise StoreNotFound(f"agent_document '{rkey}' not found")
+            await self._db.commit()
+        except StoreNotFound:
+            raise
+        except Exception:
+            await self._db.rollback()
+            raise
 
 
 class RecordStore:
@@ -211,6 +232,7 @@ class RecordStore:
         now = _now()
         payload = json.dumps(record)
         try:
+            await self._db.execute("BEGIN IMMEDIATE")
             await self._db.execute(
                 "INSERT INTO private_records "
                 "(collection, rkey, record, created_at, updated_at) "
@@ -219,9 +241,13 @@ class RecordStore:
             )
             await self._db.commit()
         except aiosqlite.IntegrityError as e:
+            await self._db.rollback()
             raise StoreNotFound(
                 f"private_record '{collection}/{rkey}' already exists"
             ) from e
+        except Exception:
+            await self._db.rollback()
+            raise
         return {"value": record}
 
     async def update(
@@ -229,14 +255,22 @@ class RecordStore:
     ) -> dict[str, Any]:
         now = _now()
         payload = json.dumps(record)
-        cur = await self._db.execute(
-            "UPDATE private_records SET record = ?, updated_at = ? "
-            "WHERE collection = ? AND rkey = ?",
-            (payload, now, collection, rkey),
-        )
-        if cur.rowcount == 0:
-            raise StoreNotFound(f"private_record '{collection}/{rkey}' not found")
-        await self._db.commit()
+        try:
+            await self._db.execute("BEGIN IMMEDIATE")
+            cur = await self._db.execute(
+                "UPDATE private_records SET record = ?, updated_at = ? "
+                "WHERE collection = ? AND rkey = ?",
+                (payload, now, collection, rkey),
+            )
+            if cur.rowcount == 0:
+                await self._db.rollback()
+                raise StoreNotFound(f"private_record '{collection}/{rkey}' not found")
+            await self._db.commit()
+        except StoreNotFound:
+            raise
+        except Exception:
+            await self._db.rollback()
+            raise
         return {"value": record}
 
     async def get(self, collection: str, rkey: str) -> dict[str, Any]:
@@ -285,13 +319,21 @@ class RecordStore:
         return out
 
     async def delete(self, collection: str, rkey: str) -> None:
-        cur = await self._db.execute(
-            "DELETE FROM private_records WHERE collection = ? AND rkey = ?",
-            (collection, rkey),
-        )
-        if cur.rowcount == 0:
-            raise StoreNotFound(f"private_record '{collection}/{rkey}' not found")
-        await self._db.commit()
+        try:
+            await self._db.execute("BEGIN IMMEDIATE")
+            cur = await self._db.execute(
+                "DELETE FROM private_records WHERE collection = ? AND rkey = ?",
+                (collection, rkey),
+            )
+            if cur.rowcount == 0:
+                await self._db.rollback()
+                raise StoreNotFound(f"private_record '{collection}/{rkey}' not found")
+            await self._db.commit()
+        except StoreNotFound:
+            raise
+        except Exception:
+            await self._db.rollback()
+            raise
 
 
 class ChatStore:
@@ -309,11 +351,16 @@ class ChatStore:
         if rkey is None:
             rkey = _new_rkey()
         now = _now()
-        await self._db.execute(
-            "INSERT INTO chat_sessions (rkey, title, created_at) VALUES (?, ?, ?)",
-            (rkey, title, now),
-        )
-        await self._db.commit()
+        try:
+            await self._db.execute("BEGIN IMMEDIATE")
+            await self._db.execute(
+                "INSERT INTO chat_sessions (rkey, title, created_at) VALUES (?, ?, ?)",
+                (rkey, title, now),
+            )
+            await self._db.commit()
+        except Exception:
+            await self._db.rollback()
+            raise
         return {"rkey": rkey, "title": title, "createdAt": now}
 
     async def get_session(self, rkey: str) -> dict[str, Any] | None:
@@ -328,25 +375,36 @@ class ChatStore:
 
     async def set_title(self, rkey: str, title: str) -> None:
         """Update a session's title."""
-        await self._db.execute(
-            "UPDATE chat_sessions SET title = ? WHERE rkey = ?",
-            (title, rkey),
-        )
-        await self._db.commit()
+        try:
+            await self._db.execute("BEGIN IMMEDIATE")
+            await self._db.execute(
+                "UPDATE chat_sessions SET title = ? WHERE rkey = ?",
+                (title, rkey),
+            )
+            await self._db.commit()
+        except Exception:
+            await self._db.rollback()
+            raise
 
     async def ensure_session(
         self, rkey: str, title: str = ""
     ) -> dict[str, Any]:
         """Create a session with the given rkey if it doesn't exist; idempotent."""
         now = _now()
-        await self._db.execute(
-            "INSERT OR IGNORE INTO chat_sessions (rkey, title, created_at) "
-            "VALUES (?, ?, ?)",
-            (rkey, title, now),
-        )
-        await self._db.commit()
+        try:
+            await self._db.execute("BEGIN IMMEDIATE")
+            await self._db.execute(
+                "INSERT OR IGNORE INTO chat_sessions (rkey, title, created_at) "
+                "VALUES (?, ?, ?)",
+                (rkey, title, now),
+            )
+            await self._db.commit()
+        except Exception:
+            await self._db.rollback()
+            raise
         existing = await self.get_session(rkey)
-        assert existing is not None
+        if existing is None:
+            raise RuntimeError("ensure_session failed: session not found after create")
         return existing
 
     async def list_sessions(
@@ -385,23 +443,36 @@ class ChatStore:
 
     async def delete_session(self, rkey: str) -> None:
         # cascade-deletes messages via FK
-        cur = await self._db.execute(
-            "DELETE FROM chat_sessions WHERE rkey = ?", (rkey,)
-        )
-        if cur.rowcount == 0:
-            raise StoreNotFound(f"chat_session '{rkey}' not found")
-        await self._db.commit()
+        try:
+            await self._db.execute("BEGIN IMMEDIATE")
+            cur = await self._db.execute(
+                "DELETE FROM chat_sessions WHERE rkey = ?", (rkey,)
+            )
+            if cur.rowcount == 0:
+                await self._db.rollback()
+                raise StoreNotFound(f"chat_session '{rkey}' not found")
+            await self._db.commit()
+        except StoreNotFound:
+            raise
+        except Exception:
+            await self._db.rollback()
+            raise
 
     async def create_message(
         self, session_id: str, sender: str, content: str
     ) -> dict[str, Any]:
         now = _now()
-        cur = await self._db.execute(
-            "INSERT INTO chat_messages (session_id, sender, content, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (session_id, sender, content, now),
-        )
-        await self._db.commit()
+        try:
+            await self._db.execute("BEGIN IMMEDIATE")
+            cur = await self._db.execute(
+                "INSERT INTO chat_messages (session_id, sender, content, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (session_id, sender, content, now),
+            )
+            await self._db.commit()
+        except Exception:
+            await self._db.rollback()
+            raise
         return {
             "id": cur.lastrowid,
             "sessionId": session_id,
