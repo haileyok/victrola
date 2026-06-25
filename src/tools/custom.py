@@ -78,7 +78,7 @@ class CustomToolManager:
 
         while True:
             if self._store.documents is None:
-            raise RuntimeError("DocumentStore is not initialized")
+                raise RuntimeError("DocumentStore is not initialized")
             resp = await self._store.documents.list(limit=100, cursor=cursor)
             documents = resp.get("documents", [])
 
