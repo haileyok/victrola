@@ -94,7 +94,7 @@ class MCPServerConfig:
     """Persisted server configuration + discovered tools."""
 
     name: str
-    transport: Literal["sse", "stdio"]
+    transport: Literal["sse", "stdio", "streamable_http"]
     url: str | None = None
     command: str | None = None
     args: list[str] = field(default_factory=list)
@@ -179,8 +179,28 @@ class MCPConnection:
                 from mcp.client.sse import sse_client
 
                 read, write = await self._stack.enter_async_context(
-                    sse_client(self._config.url, headers=headers or None, auth=auth)
+                    sse_client(
+                        self._config.url,
+                        headers=headers or None,
+                        auth=auth,
+                        timeout=30.0,
+                    )
                 )
+            elif self._config.transport == "streamable_http":
+                if not self._config.url:
+                    raise ValueError(f"Streamable HTTP transport requires URL for server '{self._config.name}'")
+                from mcp.client.streamable_http import streamablehttp_client
+
+                result = await self._stack.enter_async_context(
+                    streamablehttp_client(
+                        self._config.url,
+                        headers=headers or None,
+                        auth=auth,
+                        timeout=30.0,
+                    )
+                )
+                # streamablehttp_client returns (read, write, get_session_id)
+                read, write = result[0], result[1]
             elif self._config.transport == "stdio":
                 if not self._config.command:
                     raise ValueError(
@@ -643,9 +663,9 @@ class MCPManager:
         if config.auth_token_secret and config.auth_type == "none":
             config.auth_type = "bearer"
 
-        # OAuth only works with SSE transport
-        if config.auth_type == "oauth" and config.transport != "sse":
-            return "Error: OAuth auth_type requires SSE transport."
+        # OAuth only works with SSE or streamable_http transport
+        if config.auth_type == "oauth" and config.transport not in ("sse", "streamable_http"):
+            return "Error: OAuth auth_type requires SSE or streamable_http transport."
 
         rkey = f"{MCP_RKEY_PREFIX}{config.name}"
         content = json.dumps(config.to_dict())

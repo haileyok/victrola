@@ -23,7 +23,7 @@ export function MCPView() {
 
   // form state
   const [name, setName] = useState("");
-  const [transport, setTransport] = useState<"sse" | "stdio">("sse");
+  const [transport, setTransport] = useState<"sse" | "stdio" | "streamable_http">("streamable_http");
   const [url, setUrl] = useState("");
   const [command, setCommand] = useState("");
   const [args, setArgs] = useState("");
@@ -161,10 +161,17 @@ export function MCPView() {
               <div className="flex gap-2 mt-1">
                 <Button
                   size="sm"
+                  variant={transport === "streamable_http" ? "default" : "outline"}
+                  onClick={() => setTransport("streamable_http")}
+                >
+                  HTTP
+                </Button>
+                <Button
+                  size="sm"
                   variant={transport === "sse" ? "default" : "outline"}
                   onClick={() => setTransport("sse")}
                 >
-                  SSE (HTTP)
+                  SSE
                 </Button>
                 <Button
                   size="sm"
@@ -175,7 +182,7 @@ export function MCPView() {
                 </Button>
               </div>
             </div>
-            {transport === "sse" ? (
+            {transport === "sse" || transport === "streamable_http" ? (
               <div>
                 <label className="text-sm font-medium">URL</label>
                 <Input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://api.example.com/mcp" />

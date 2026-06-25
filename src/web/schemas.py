@@ -123,7 +123,7 @@ class SystemPromptResponse(BaseModel):
 
 class CreateMCPServerRequest(BaseModel):
     name: str
-    transport: Literal["sse", "stdio"]
+    transport: Literal["sse", "stdio", "streamable_http"]
     url: str | None = None
     command: str | None = None
     args: list[str] = []
