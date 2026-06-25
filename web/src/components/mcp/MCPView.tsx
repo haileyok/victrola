@@ -54,7 +54,7 @@ export function MCPView() {
       await api.createMCPServer({
         name,
         transport,
-        url: transport === "sse" ? url || undefined : undefined,
+        url: (transport === "sse" || transport === "streamable_http") ? url || undefined : undefined,
         command: transport === "stdio" ? command || undefined : undefined,
         args: transport === "stdio" && args ? args.split(/\s+/) : [],
         auth_type: authType,
