@@ -255,18 +255,18 @@ class MemoryStore:
     async def get_by_type(
         self, type: str, limit: int = 20, cursor: int | None = None
     ) -> dict[str, Any]:
-        """Paginated list of entries by type."""
+        """Paginated list of entries by type, newest-first."""
         limit = max(1, min(limit, 500))
         if cursor:
             cur = await self._db.execute(
                 "SELECT id, type, scope, content, metadata, embedding, created_at, updated_at "
-                "FROM memory_entries WHERE type = ? AND id > ? ORDER BY id LIMIT ?",
+                "FROM memory_entries WHERE type = ? AND id < ? ORDER BY id DESC LIMIT ?",
                 (type, cursor, limit + 1),
             )
         else:
             cur = await self._db.execute(
                 "SELECT id, type, scope, content, metadata, embedding, created_at, updated_at "
-                "FROM memory_entries WHERE type = ? ORDER BY id LIMIT ?",
+                "FROM memory_entries WHERE type = ? ORDER BY id DESC LIMIT ?",
                 (type, limit + 1),
             )
         rows = await cur.fetchall()
@@ -283,7 +283,11 @@ class MemoryStore:
     async def list_entries(
         self, type: str | None = None, limit: int = 50, cursor: int | None = None
     ) -> dict[str, Any]:
-        """Paginated list of entries, optionally filtered by type."""
+        """Paginated list of entries, optionally filtered by type.
+
+        Ordered newest-first (id DESC). Cursor is the last ID in the
+        previous page; the next page fetches entries with id < cursor.
+        """
         limit = max(1, min(limit, 500))
         if type is not None and type not in _VALID_TYPES:
             raise ValueError(f"Invalid memory type '{type}'")
@@ -294,17 +298,17 @@ class MemoryStore:
         )
         if type:
             if cursor:
-                sql = f"{base_select} WHERE type = ? AND id > ? ORDER BY id LIMIT ?"
+                sql = f"{base_select} WHERE type = ? AND id < ? ORDER BY id DESC LIMIT ?"
                 params: tuple = (type, cursor, limit + 1)
             else:
-                sql = f"{base_select} WHERE type = ? ORDER BY id LIMIT ?"
+                sql = f"{base_select} WHERE type = ? ORDER BY id DESC LIMIT ?"
                 params = (type, limit + 1)
         else:
             if cursor:
-                sql = f"{base_select} WHERE id > ? ORDER BY id LIMIT ?"
+                sql = f"{base_select} WHERE id < ? ORDER BY id DESC LIMIT ?"
                 params = (cursor, limit + 1)
             else:
-                sql = f"{base_select} ORDER BY id LIMIT ?"
+                sql = f"{base_select} ORDER BY id DESC LIMIT ?"
                 params = (limit + 1,)
 
         cur = await self._db.execute(sql, params)
