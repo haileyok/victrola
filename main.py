@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from collections.abc import Callable
-from typing import Literal
+from typing import Any, Literal
 
 import click
 import httpx
@@ -97,7 +97,9 @@ def _wire_scheduler(executor: ToolExecutor, agent: Agent) -> None:
     if executor._scheduler is not None:
 
         async def on_schedule_fire(task_name: str, prompt: str) -> str:
-            return await agent.chat(f"[Scheduled task: {task_name}] {prompt}")
+            return await agent.chat(
+                f"[Scheduled task: {task_name}] {prompt}", conversation=[]
+            )
 
         executor._scheduler._on_fire = on_schedule_fire
 
@@ -278,6 +280,7 @@ def chat(
         logger.info("Services initialized. Starting interactive chat.")
         print("\nAgent ready. Type your message (Ctrl+C to exit).\n")
 
+        conversation: list[dict[str, Any]] = []
         while True:
             try:
                 user_input = input("You: ")
@@ -288,7 +291,7 @@ def chat(
                 continue
 
             logger.info("User: %s", user_input)
-            response = await agent.chat(user_input)
+            response = await agent.chat(user_input, conversation=conversation)
             print(f"\nAgent: {response}\n")
 
     try:

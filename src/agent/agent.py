@@ -475,17 +475,11 @@ class Agent:
                 )
 
         self._tool_executor = tool_executor
-        self._conversation: list[dict[str, Any]] = []
         self._max_iterations = max_iterations
         self._system_prompt = system_prompt
         self._system_prompt_provider = system_prompt_provider
         self._sub_llm_client = sub_llm_client
         self._compact_threshold_chars = compact_threshold_chars
-        # Serializes all chat() calls across surfaces (TUI, Discord, scheduler
-        # fires). `_conversation` is shared mutable state; without this lock,
-        # a Discord message arriving during a TUI chat's LLM await could
-        # swap it out mid-call.
-        self._chat_lock = asyncio.Lock()
 
     # number of messages from the end to preserve full tool results
     TOOL_RESULT_PRESERVE_COUNT = 4
@@ -507,7 +501,7 @@ class Agent:
         else:
             return {"error": f"Unknown tool: {tool_use.name}"}
 
-    def _repair_conversation(self) -> None:
+    def _repair_conversation(self, conversation: list[dict[str, Any]]) -> None:
         """Fix broken tool_use/tool_result pairs in conversation history.
 
         If a previous chat() call crashed mid-tool-execution, or concurrent
@@ -516,8 +510,8 @@ class Agent:
         The Anthropic API rejects these. This method patches them up.
         """
         i = 0
-        while i < len(self._conversation):
-            msg = self._conversation[i]
+        while i < len(conversation):
+            msg = conversation[i]
             if msg["role"] != "assistant":
                 i += 1
                 continue
@@ -537,7 +531,7 @@ class Agent:
 
             # collect tool_result ids from next message (if it exists and is a user message)
             existing_result_ids: set[str] = set()
-            next_msg = self._conversation[i + 1] if i + 1 < len(self._conversation) else None
+            next_msg = conversation[i + 1] if i + 1 < len(conversation) else None
             if next_msg and next_msg["role"] == "user":
                 next_content = next_msg.get("content", [])
                 if isinstance(next_content, list):
@@ -565,23 +559,23 @@ class Agent:
                     i += 2
                 else:
                     # insert a new tool_result message
-                    self._conversation.insert(i + 1, {"role": "user", "content": patch})
+                    conversation.insert(i + 1, {"role": "user", "content": patch})
                     i += 2
             else:
                 i += 1
 
-    def _trim_old_tool_results(self) -> None:
+    def _trim_old_tool_results(self, conversation: list[dict[str, Any]]) -> None:
         """Replace verbose tool_result content with a short summary for older messages.
 
         Keeps the last TOOL_RESULT_PRESERVE_COUNT messages intact so the LLM
         has recent context, but shrinks older tool results to save tokens.
         """
-        cutoff = len(self._conversation) - self.TOOL_RESULT_PRESERVE_COUNT
+        cutoff = len(conversation) - self.TOOL_RESULT_PRESERVE_COUNT
         if cutoff <= 0:
             return
 
         for i in range(cutoff):
-            msg = self._conversation[i]
+            msg = conversation[i]
             if msg["role"] != "user":
                 continue
             content = msg["content"]
@@ -606,38 +600,38 @@ class Agent:
                 })
                 changed = True
             if changed:
-                self._conversation[i] = {**msg, "content": new_content}
+                conversation[i] = {**msg, "content": new_content}
 
     @staticmethod
     def _accumulate_usage(total: dict[str, int], usage: dict[str, int]) -> None:
         for k, v in usage.items():
             total[k] = total.get(k, 0) + v
 
-    async def _maybe_compact(self) -> None:
+    async def _maybe_compact(self, conversation: list[dict[str, Any]]) -> None:
         """Summarize older conversation messages when the char budget is exceeded.
 
         Keeps the most recent ~25% of the budget as raw messages; replaces
         everything older with a single summary turn produced by the sub-agent.
         No-ops if no sub-agent LLM is wired in.
         """
-        if self._sub_llm_client is None or not self._conversation:
+        if self._sub_llm_client is None or not conversation:
             return
 
-        total = sum(len(str(m.get("content", ""))) for m in self._conversation)
+        total = sum(len(str(m.get("content", ""))) for m in conversation)
         if total <= self._compact_threshold_chars:
             return
 
         keep_chars = self._compact_threshold_chars // 4
         cumulative = 0
-        split_idx = len(self._conversation)
-        for i in range(len(self._conversation) - 1, -1, -1):
-            cumulative += len(str(self._conversation[i].get("content", "")))
+        split_idx = len(conversation)
+        for i in range(len(conversation) - 1, -1, -1):
+            cumulative += len(str(conversation[i].get("content", "")))
             if cumulative >= keep_chars:
                 split_idx = i
                 break
 
-        older = self._conversation[:split_idx]
-        recent = self._conversation[split_idx:]
+        older = conversation[:split_idx]
+        recent = conversation[split_idx:]
         if not older:
             return
 
@@ -692,7 +686,9 @@ class Agent:
             len(summary),
             len(recent),
         )
-        self._conversation = [
+        # Use slice assignment so the caller's list is mutated in place
+        # (a plain `conversation = ...` would only rebind the local).
+        conversation[:] = [
             {
                 "role": "user",
                 "content": (
@@ -704,53 +700,39 @@ class Agent:
     async def chat(
         self,
         user_message: str,
+        conversation: list[dict[str, Any]],
         on_event: Callable[[AgentEvent], Awaitable[None]] | None = None,
-        conversation_override: list[dict[str, Any]] | None = None,
         images: list[dict[str, str]] | None = None,
     ) -> str:
         """Send a message and get a response, handling tool calls.
 
-        When `conversation_override` is provided, the agent uses that as its
-        conversation history for this turn and restores the previous history
-        afterward. This is how the Discord bot and scheduler isolate per-session
-        context without the caller having to swap `_conversation` manually
-        (which would race against other callers between the swap and the
-        LLM await).
+        `conversation` is a list owned by the caller and mutated in place —
+        each surface (TUI, Discord, scheduler) maintains its own conversation
+        list and passes it here. The agent does not hold shared conversation
+        state.
 
         When `images` is provided, the current user turn is sent as a multi-
         block message with images first, then text. Each image dict should be
         `{"media_type": "image/png", "data": "<base64>"}`. Images are ephemeral
         — they only affect this turn; nothing is persisted to the conversation
         store for them.
-
-        All chat() calls are serialized via `_chat_lock` so `_conversation`
-        is never mutated by another caller mid-flight.
         """
 
         async def _emit(event: AgentEvent) -> None:
             if on_event is not None:
                 await on_event(event)
 
-        async with self._chat_lock:
-            saved_conv: list[dict[str, Any]] | None = None
-            if conversation_override is not None:
-                saved_conv = self._conversation
-                self._conversation = list(conversation_override)
-            try:
-                return await self._chat_impl(user_message, _emit, images=images)
-            finally:
-                if saved_conv is not None:
-                    self._conversation = saved_conv
+        return await self._chat_impl(user_message, conversation, _emit, images=images)
 
     async def _chat_impl(
         self,
         user_message: str,
+        conversation: list[dict[str, Any]],
         _emit: Callable[[AgentEvent], Awaitable[None]],
         images: list[dict[str, str]] | None = None,
     ) -> str:
-        """Inner chat loop; caller holds `_chat_lock` and has already set
-        `_conversation` to the target history (possibly swapped from another
-        session). Do not call directly — go through `chat()`."""
+        """Inner chat loop. `conversation` is the caller-owned list that
+        will be mutated in place. Do not call directly — go through `chat()`."""
         # refresh the system prompt before each operator turn so that newly
         # added secrets, approved custom tools, self-note edits, and skills
         # show up without restarting the harness.
@@ -765,7 +747,7 @@ class Agent:
 
         # compact the conversation if it's gotten huge
         try:
-            await self._maybe_compact()
+            await self._maybe_compact(conversation)
         except Exception:
             logger.exception("compaction failed; continuing with raw conversation")
 
@@ -787,21 +769,21 @@ class Agent:
                     }
                 )
             content_blocks.append({"type": "text", "text": timestamped})
-            self._conversation.append({"role": "user", "content": content_blocks})
+            conversation.append({"role": "user", "content": content_blocks})
         else:
-            self._conversation.append({"role": "user", "content": timestamped})
+            conversation.append({"role": "user", "content": timestamped})
 
         total_usage: dict[str, int] = {}
         iteration = 0
         while iteration < self._max_iterations:
             iteration += 1
 
-            self._repair_conversation()
-            self._trim_old_tool_results()
+            self._repair_conversation(conversation)
+            self._trim_old_tool_results(conversation)
 
             await _emit(AgentEvent(kind="llm_start"))
             resp = await self._client.complete(
-                messages=self._conversation,
+                messages=conversation,
                 system=self._system_prompt,
                 tools=self._get_tools(),
             )
@@ -835,7 +817,7 @@ class Agent:
             }
             if resp.reasoning_content:
                 assistant_msg["reasoning_content"] = resp.reasoning_content
-            self._conversation.append(assistant_msg)
+            conversation.append(assistant_msg)
 
             # find any tool calls that we need to handle
             if resp.stop_reason == "tool_use":
@@ -875,7 +857,7 @@ class Agent:
                             }
                         )
 
-                self._conversation.append({"role": "user", "content": tool_results})
+                conversation.append({"role": "user", "content": tool_results})
             else:
                 # once there are no more tool calls, we proceed to the text response
                 if total_usage:
@@ -886,17 +868,17 @@ class Agent:
         logger.warning(
             "Hit max iterations (%d), forcing final response", self._max_iterations
         )
-        self._conversation.append(
+        conversation.append(
             {
                 "role": "user",
                 "content": "[System: Max tool calls reached. Provide final response now.]",
             }
         )
-        self._repair_conversation()
-        self._trim_old_tool_results()
+        self._repair_conversation(conversation)
+        self._trim_old_tool_results(conversation)
         await _emit(AgentEvent(kind="llm_start"))
         resp = await self._client.complete(
-            messages=self._conversation,
+            messages=conversation,
             system=self._system_prompt,
             tools=None,  # no tools for final call
         )
