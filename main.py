@@ -100,11 +100,6 @@ def build_services(
         model_endpoint=model_endpoint or CONFIG.model_endpoint or None,
         tool_executor=executor,
         sub_llm_client=llm_client,
-        umans_websearch_provider=(
-            CONFIG.umans_websearch_provider
-            if effective_model_api == "umans"
-            else "none"
-        ),
     )
 
     return executor, agent
@@ -145,7 +140,7 @@ def _build_discord_bot(executor: ToolExecutor, agent: Agent):
 
 
 async def _load_system_prompt(
-    tool_context: ToolContext, executor: ToolExecutor, agent: Agent
+    tool_context: ToolContext, executor: ToolExecutor
 ) -> str:
     """Load self-note, operator-note, skills, and tool docs into the system prompt."""
     self_doc = ""
@@ -220,7 +215,6 @@ async def _load_system_prompt(
         tool_docs=tool_docs,
         secret_names=secret_names,
         custom_tools_list=custom_tools_list,
-        native_web_search=agent.native_web_search_enabled,
     )
 
 
@@ -285,7 +279,7 @@ def main(
             await _init_memory(executor, agent)
 
             async def _refresh_prompt() -> str:
-                return await _load_system_prompt(executor.ctx, executor, agent)
+                return await _load_system_prompt(executor.ctx, executor)
 
             agent.system_prompt_provider = _refresh_prompt
             agent.system_prompt = await _refresh_prompt()
@@ -328,7 +322,7 @@ def chat(
             await _init_memory(executor, agent)
 
             async def _refresh_prompt() -> str:
-                return await _load_system_prompt(executor.ctx, executor, agent)
+                return await _load_system_prompt(executor.ctx, executor)
 
             agent.system_prompt_provider = _refresh_prompt
             agent.system_prompt = await _refresh_prompt()
@@ -380,7 +374,7 @@ def serve(
             await _init_memory(executor, agent)
 
             async def _refresh_prompt() -> str:
-                return await _load_system_prompt(executor.ctx, executor, agent)
+                return await _load_system_prompt(executor.ctx, executor)
 
             agent.system_prompt_provider = _refresh_prompt
             agent.system_prompt = await _refresh_prompt()

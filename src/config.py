@@ -50,8 +50,6 @@ class Config(BaseSettings):
     # umans
     umans_endpoint: str = "https://api.code.umans.ai"
     """base url for the umans api"""
-    umans_websearch_provider: Literal["exa", "native", "none"] = "none"
-    """when using umans model api, the web search provider to use server-side"""
 
     # embeddings (Ollama local)
     embedding_endpoint: str = "http://localhost:11434"
