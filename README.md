@@ -292,6 +292,7 @@ You can chat with the agent from Signal in addition to the web interface. Signal
    SIGNAL_BOT_PHONE=+1234567890
    SIGNAL_OPERATOR_PHONE=+0987654321
    ```
+   `SIGNAL_OPERATOR_PHONE` can be a phone number or a Signal UUID — username-only accounts are matched via `sourceUuid`.
 
 4. Restart victrola. The bot polls for messages every ~2 seconds and maintains a single persistent chat session (`signal-persistent`) that survives restarts.
 
@@ -302,3 +303,15 @@ You can chat with the agent from Signal in addition to the web interface. Signal
 - Long responses are chunked into multiple messages at ~1900 chars.
 - Image attachments are supported (ephemeral — not persisted to the conversation store).
 - The agent's `notify.signal` and `notify.send` tools work independently of the chat loop, so you can send notifications even when the bot isn't running.
+
+## Compaction (optional)
+
+When a conversation grows too large, older messages are summarized by the sub-agent into a single summary turn. The most recent ~25% of the threshold is kept as raw messages; everything older is replaced with the summary. Compaction checkpoints are persisted to the store, so summaries are reused on reload instead of re-summarizing.
+
+The threshold is configurable in `.env`:
+
+```env
+COMPACT_THRESHOLD_CHARS=240000   # ~60k tokens at ~4 chars/token
+```
+
+Requires a sub-agent LLM (`SUB_MODEL_*` config). If no sub-agent is configured, compaction is a no-op and conversations grow unbounded.
