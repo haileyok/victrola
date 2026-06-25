@@ -115,6 +115,46 @@ class ToolExecutor:
         except Exception:
             logger.warning("Failed to initialize custom tool manager", exc_info=True)
 
+        # initialize embedding client (Ollama) — non-fatal if unavailable
+        embedding_client = None
+        try:
+            from src.memory.embeddings import EmbeddingClient
+
+            embedding_client = EmbeddingClient(
+                endpoint=CONFIG.embedding_endpoint,
+                model=CONFIG.embedding_model,
+                dimensions=CONFIG.embedding_dimensions,
+            )
+            self._ctx._embedding_client = embedding_client
+        except Exception:
+            logger.warning("Failed to initialize embedding client", exc_info=True)
+
+        # wire embedding client into MemoryStore for auto-embedding on write
+        if store.memory is not None and embedding_client is not None:
+            store.memory.set_embedding_client(
+                embedding_client, dimensions=CONFIG.embedding_dimensions
+            )
+
+        # initialize search engine (hybrid FTS5 + vector cosine)
+        try:
+            from src.memory.search import SearchEngine
+
+            search_engine = SearchEngine(
+                store=store.memory,
+                embedding_client=embedding_client,
+            )
+            self._ctx._search_engine = search_engine
+        except Exception:
+            logger.warning("Failed to initialize search engine", exc_info=True)
+
+    async def aclose(self) -> None:
+        """Close resources held by the executor (embedding client HTTP connection)."""
+        if self._ctx._embedding_client is not None:
+            try:
+                await self._ctx._embedding_client.close()
+            except Exception:
+                logger.warning("Error closing embedding client", exc_info=True)
+
     async def execute_code(self, code: str) -> dict[str, Any]:
         """
         execute Typescript code in a deno subprocess.
@@ -463,17 +503,17 @@ const params = {params_json};
         if self._tool_definition is not None:
             return self._tool_definition
 
-        description = """Run TypeScript in a sandboxed Deno runtime. This is the ONLY way to invoke any tool — every operation (reading notes, searching the web, sending Discord alerts, creating schedules, etc.) must go through TypeScript code you submit to this function.
+        description = """Run TypeScript in a sandboxed Deno runtime. This is the ONLY way to invoke any tool — every operation (managing memory, searching the web, sending Discord alerts, creating schedules, etc.) must go through TypeScript code you submit to this function.
 
-The code has access to a global `tools` namespace (e.g. `tools.notes.note_get(...)`, `tools.web.web_search(...)`). See the full catalog in the system prompt. Use `output(value)` to return results and `debug(...args)` to log.
+The code has access to a global `tools` namespace (e.g. `tools.memory.get(...)`, `tools.web.web_search(...)`). See the full catalog in the system prompt. Use `output(value)` to return results and `debug(...args)` to log.
 
 Always wrap tool calls in `await` and batch independent calls with `Promise.allSettled([...])` inside a single code submission.
 
 Example:
 ```typescript
-const note = await tools.notes.note_get({ rkeys: ["operator"] });
-const results = await tools.web.web_search({ query: "victrola agent", num_results: 3 });
-output({ note, results });
+const result = await tools.memory.get({ scope: "operator" });
+const search = await tools.memory.search({ query: "deploy steps" });
+output({ result, search });
 ```"""
 
         self._tool_definition = {

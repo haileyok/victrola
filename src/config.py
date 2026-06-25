@@ -53,6 +53,14 @@ class Config(BaseSettings):
     umans_websearch_provider: Literal["exa", "native", "none"] = "none"
     """when using umans model api, the web search provider to use server-side"""
 
+    # embeddings (Ollama local)
+    embedding_endpoint: str = "http://localhost:11434"
+    """Ollama API endpoint for embeddings"""
+    embedding_model: str = "nomic-embed-text"
+    """embedding model name (768 dims for nomic-embed-text)"""
+    embedding_dimensions: int = 768
+    """dimensionality of the embedding model"""
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

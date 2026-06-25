@@ -22,7 +22,7 @@ Deno runs with the bare minimum of permissions: no filesystem writes, no network
 
 | Namespace | Tool | What it does |
 |-----------|------|---|
-| `notes` | `note_upsert`, `note_get`, `note_list` | Persistent memory. `self` note holds the agent's personality; `operator` note holds what it knows about you; `skill:*` holds reusable procedures. |
+| `memory` | `add`, `update`, `delete`, `search`, `get`, `list_skills`, `get_skill` | Entry-based memory with hybrid search. `self` holds the agent's personality; `operator` holds facts about you; `skill:*` holds reusable procedures; `episodic` and `factual` are RAG-retrieved per turn. |
 | `scheduler` | `list_schedules`, `get_schedule` | View scheduled tasks. Creation is via the web interface. |
 | `notify` | `discord` | Send a message to Discord via webhook (requires `DISCORD_WEBHOOK_URL` secret). |
 | `summarize` | `summarize` | Summarize text using the sub-agent model. |
@@ -66,10 +66,36 @@ The agent can propose new tools by calling `custom_tools.create_custom_tool` dur
 
 If a tool references a secret that isn't configured yet, the approval flow walks you through setting each missing secret before completing approval.
 
+## Memory
+
+The agent has an entry-based memory system with hybrid search and RAG recall. All memory lives in SQLite (`memory_entries` table).
+
+### Memory types
+
+| Type | Structure | Consumption |
+|------|-----------|-------------|
+| `self` | Single entry | Always in system prompt |
+| `operator` | Multi-entry (individual facts) | All entries in system prompt every turn |
+| `skill` | Single entry per skill | Name + preview in prompt; full content loaded on demand |
+| `episodic` | Multi-entry | RAG-retrieved per turn based on relevance |
+| `factual` | Multi-entry | RAG-retrieved per turn based on relevance |
+
+### Search
+
+`memory.search` combines FTS5 keyword matching with vector cosine similarity over embeddings (via local Ollama). If either subsystem is unavailable, it degrades gracefully to keyword-only or semantic-only.
+
+### RAG recall
+
+Before each turn, the user's message is embedded and relevant `episodic` + `factual` entries are retrieved and injected into the system prompt as a `# Relevant Memories` section. This is transient — it's not persisted or visible in the static system prompt viewer.
+
+### Embeddings
+
+Embeddings are generated via a local Ollama instance using `nomic-embed-text` (768 dimensions). If Ollama isn't running, memory writes store NULL embeddings and searches fall back to keyword-only. Embeddings are backfilled automatically when Ollama becomes available.
+
 ## Storage
 
 Everything persistent lives under `./data/`:
-- `store.db` — SQLite: notes, skills, chat sessions + messages, custom tool definitions, namespaced records
+- `store.db` — SQLite: memory entries (+ FTS5 index + embeddings), chat sessions + messages, custom tool definitions, namespaced records
 - `secrets.json` — named secrets (injected as env vars into custom tool Deno processes)
 - `schedules.json` — scheduled prompts
 
@@ -156,6 +182,18 @@ Override the Umans API base URL if needed:
 ```env
 UMANS_ENDPOINT=https://api.code.umans.ai
 ```
+
+## Embeddings (optional)
+
+Embeddings (for memory search and RAG recall) use a local Ollama instance:
+
+```env
+EMBEDDING_ENDPOINT=http://localhost:11434
+EMBEDDING_MODEL=nomic-embed-text
+EMBEDDING_DIMENSIONS=768
+```
+
+If Ollama isn't running, memory writes store NULL embeddings and searches fall back to keyword-only.
 
 ## Usage
 

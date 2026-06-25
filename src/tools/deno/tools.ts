@@ -11,7 +11,7 @@ The `parameters` field must be a valid JSON Schema object describing the tool's 
 The `code` field is TypeScript source that will run in Deno. It receives a `params` object with the input parameters and has access to `output()` and `debug()` functions, plus the `tools` namespace.
 
 Use `list_available_secrets` to see what secrets the operator has configured. Reference them by name in the `secrets` field — they'll be injected as env vars (accessed via `Deno.env.get("SECRET_NAME")`). */
-  create_custom_tool: (name: string, description: string, parameters: Record<string, unknown>, code: string, response_schema?: Record<string, unknown>, secrets?: unknown[]): Promise<unknown> => callTool("custom_tools.create_custom_tool", { name, description, parameters, code, response_schema, secrets }),
+  create_custom_tool: (name: string, description: string, parameters: Record<string, unknown>, code: string, response_schema?: Record<string, unknown>, secrets?: unknown[], requires_net?: boolean): Promise<unknown> => callTool("custom_tools.create_custom_tool", { name, description, parameters, code, response_schema, secrets, requires_net }),
 
   /** Delete a custom tool. */
   delete_custom_tool: (name: string): Promise<unknown> => callTool("custom_tools.delete_custom_tool", { name }),
@@ -34,38 +34,66 @@ export const image = {
   view_image: (url: string): Promise<unknown> => callTool("image.view_image", { url }),
 };
 
-export const notes = {
-  /** Retrieve the full content of one or more notes by rkey. Works for any rkey — `self`, `operator`, `skill:*`, `task:*`, or any free-form note name.
+export const memory = {
+  /** Create a new memory entry.
 
-Call this to load full content before relying on a note. The system prompt only shows skill names with short previews — you must `note_get` to see a skill's actual content before executing it. The `operator` note is not preloaded at all — call `note_get(['operator'])` when you need to recall context about the operator.
+Memory types:
+- `self` — your identity, personality, and behavior instructions (single entry; always in system prompt)
+- `operator` — facts about the human operator (multi-entry; all in system prompt)
+- `skill` — a reusable procedure document (single entry per skill; name + preview in prompt, loaded on demand)
+- `episodic` — individual memories of events/experiences (RAG-retrieved per turn)
+- `factual` — individual facts and knowledge (RAG-retrieved per turn)
 
-Pass an array of rkeys to batch multiple reads into one call. */
-  note_get: (rkeys: unknown[]): Promise<unknown> => callTool("notes.note_get", { rkeys }),
+Use `memory.add` to create discrete entries — you don't need to read-then-rewrite
+like the old `note_upsert`. For `self`, use `memory.update` if an entry already exists.
 
-  /** List all stored notes with short content previews.
+Scope is the grouping key:
+- `self` type → scope must be `self`
+- `skill` type → scope must be `skill:<name>`
+- `operator` type → scope is `operator`
+- `episodic` / `factual` → scope can be a session ID, topic, or free-form string
 
-Use this to discover what notes exist when you're not sure, or to audit your memory. The system prompt shows `skill:*` notes by name but not your other notes — call `note_list` to see everything you've saved, then `note_get` for full content of anything interesting. */
-  note_list: (limit?: number, cursor?: string): Promise<unknown> => callTool("notes.note_list", { limit, cursor }),
+Tags are optional strings stored in metadata for filtering. */
+  add: (type: string, scope: string, content: string, tags?: unknown[]): Promise<unknown> => callTool("memory.add", { type, scope, content, tags }),
 
-  /** Create or update a note by rkey (note name).
+  /** Delete a single memory entry by ID. Other entries in the same scope are unaffected. */
+  delete: (id: number): Promise<unknown> => callTool("memory.delete", { id }),
 
-Use this to persist information across sessions. If the note exists, it will be updated (overwritten); otherwise created. To append rather than overwrite, read the existing note first and write the combined content.
+  /** Retrieve all entries for a given scope.
 
-Conventional rkeys:
-- `self` — your identity, personality, and behavior instructions (loaded into your system prompt at boot)
-- `operator` — what you know about the human operator (preferences, context, ongoing projects)
-- `skill:<name>` — a reusable procedure you can load and execute
-- `task:<name>` — progress / state for a long-running task
-- any other rkey — free-form facts, reminders, scratch space
+Use this to review everything you know about a topic or person. For example,
+scope='operator' returns all operator facts. Returns full content of each entry. */
+  get: (scope: string): Promise<unknown> => callTool("memory.get", { scope }),
 
-Rkey rules: 1-512 chars, alphanumeric with `-_.~:` */
-  note_upsert: (rkey: string, content: string): Promise<unknown> => callTool("notes.note_upsert", { rkey, content }),
+  /** Load the full content of a skill by name. */
+  get_skill: (name: string): Promise<unknown> => callTool("memory.get_skill", { name }),
+
+  /** List all saved skills with name and 80-char preview. */
+  list_skills: (): Promise<unknown> => callTool("memory.list_skills", {}),
+
+  /** Search memory entries using hybrid keyword + semantic search.
+
+Combines FTS5 keyword matching with vector cosine similarity over embeddings.
+Results include a `score` (0-1, higher is better) and `matched_by` indicator
+(semantic, keyword, or both).
+
+All filter parameters are optional. Use `type` to restrict to a single type,
+or `types` for multiple types. */
+  search: (query: string, type?: string, types?: unknown[], scope?: string, tags?: unknown[], limit?: number): Promise<unknown> => callTool("memory.search", { query, type, types, scope, tags, limit }),
+
+  /** Update a specific memory entry by ID.
+
+Only the fields you provide are changed — there is no whole-replacement semantics.
+If `content` is changed, the embedding is regenerated automatically.
+
+Use `memory.search` or `memory.get` first to find the entry ID you want to update. */
+  update: (id: number, content?: string, tags?: unknown[]): Promise<unknown> => callTool("memory.update", { id, content, tags }),
 };
 
 export const notify = {
   /** Send a message to Discord via webhook. Useful for alerting the operator about background events — scheduled task results, findings that need attention, errors, etc.
 
-Requires a secret named `DISCORD_WEBHOOK_URL` (a webhook URL from a Discord channel's integration settings). The operator configures it via the Secrets screen in the TUI.
+Requires a secret named `DISCORD_WEBHOOK_URL` (a webhook URL from a Discord channel's integration settings). The operator configures it via the Secrets page in the web interface.
 
 If `title` is provided the message renders as an embed with the title as a heading; otherwise as a plain message. Discord limits content to 2000 characters and this tool truncates beyond that. */
   discord: (content: string, title?: string): Promise<unknown> => callTool("notify.discord", { content, title }),
