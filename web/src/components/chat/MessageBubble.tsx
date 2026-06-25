@@ -20,17 +20,25 @@ export function MessageBubble({ role, content }: { role: string; content: string
       </div>
       <div
         className={cn(
-          "max-w-[85%] rounded-lg px-4 py-2 text-sm",
+          "max-w-[85%] min-w-0 overflow-hidden rounded-lg px-4 py-2 text-sm",
           isUser && "bg-primary text-primary-foreground",
           !isUser && !isSystem && "bg-secondary text-secondary-foreground",
           isSystem && "bg-destructive/10 text-destructive-foreground border border-destructive/30",
         )}
       >
         {isUser ? (
-          <div className="whitespace-pre-wrap">{content}</div>
+          <div className="whitespace-pre-wrap break-words">{content}</div>
         ) : (
-          <div className="prose prose-sm prose-invert max-w-none break-words">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+          <div className="max-w-none break-words">
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                pre: (props) => <pre {...props} className="overflow-x-auto" />,
+                code: (props) => <code {...props} className="break-words" />,
+              }}
+            >
+              {content}
+            </ReactMarkdown>
           </div>
         )}
       </div>
