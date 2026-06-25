@@ -41,8 +41,14 @@ class VictrolaApp(App):
             from src.agent.conversation import ConversationManager
             from src.agent.llm import SubAgentLLM
             from src.config import CONFIG
+            from src.agent.config_utils import resolve_sub_agent_key as _resolve_sub_agent_key
 
-            sub_api_key = CONFIG.sub_model_api_key or CONFIG.model_api_key
+            sub_api_key = _resolve_sub_agent_key(
+                model_api=CONFIG.model_api,
+                model_api_key=CONFIG.model_api_key,
+                sub_model_api=CONFIG.sub_model_api,
+                sub_model_api_key=CONFIG.sub_model_api_key,
+            )
             llm_client = None
             if sub_api_key:
                 llm_client = SubAgentLLM(
