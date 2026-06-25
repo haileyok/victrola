@@ -208,6 +208,15 @@ async def _load_system_prompt(
                 lines.append(f"- **{t.name}**: {t.description}")
             custom_tools_list = "\n".join(lines)
 
+    # build MCP servers list for the system prompt
+    mcp_servers_list = ""
+    if executor.mcp_manager is not None:
+        servers = executor.mcp_manager.list_servers()
+        if servers:
+            mcp_servers_list = "\n".join(
+                f"- **{s.name}**: {s.transport}" for s in servers
+            )
+
     return build_system_prompt(
         self_doc=self_doc,
         operator_doc=operator_doc,
@@ -215,6 +224,7 @@ async def _load_system_prompt(
         tool_docs=tool_docs,
         secret_names=secret_names,
         custom_tools_list=custom_tools_list,
+        mcp_servers_list=mcp_servers_list,
     )
 
 

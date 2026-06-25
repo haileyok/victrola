@@ -28,6 +28,7 @@ class ToolExecutor:
         self._ctx = ctx
         self._tool_definition: dict[str, Any] | None = None
         self._custom_tool_manager: Any | None = None
+        self._mcp_manager: Any | None = None
         self._secret_manager: Any | None = None
         self._scheduler: Any | None = None
 
@@ -44,6 +45,10 @@ class ToolExecutor:
     @property
     def custom_tool_manager(self) -> Any | None:
         return self._custom_tool_manager
+
+    @property
+    def mcp_manager(self) -> Any | None:
+        return self._mcp_manager
 
     @property
     def scheduler(self) -> Any | None:
@@ -115,6 +120,21 @@ class ToolExecutor:
         except Exception:
             logger.warning("Failed to initialize custom tool manager", exc_info=True)
 
+        # initialize MCP manager (connect to external MCP servers)
+        try:
+            from src.tools.mcp import MCPManager
+
+            self._mcp_manager = MCPManager(
+                store=store,
+                secret_manager=self._secret_manager,
+                registry=self._registry,
+            )
+            await self._mcp_manager.load_servers()
+            await self._mcp_manager.connect_all()
+            self._ctx._mcp_manager = self._mcp_manager
+        except Exception:
+            logger.warning("Failed to initialize MCP manager", exc_info=True)
+
         # initialize embedding client (Ollama) — non-fatal if unavailable
         embedding_client = None
         try:
@@ -149,6 +169,12 @@ class ToolExecutor:
 
     async def aclose(self) -> None:
         """Close resources held by the executor (embedding client HTTP connection)."""
+        if self._mcp_manager is not None:
+            try:
+                await self._mcp_manager.disconnect_all()
+            except Exception:
+                logger.warning("Error closing MCP connections", exc_info=True)
+
         if self._ctx._embedding_client is not None:
             try:
                 await self._ctx._embedding_client.close()

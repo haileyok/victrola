@@ -7,6 +7,8 @@ import { ToolDetail } from "./components/tools/ToolDetail";
 import { SecretsView } from "./components/secrets/SecretsView";
 import { SchedulesView } from "./components/schedules/SchedulesView";
 import { SystemPromptView } from "./components/system-prompt/SystemPromptView";
+import { MCPView } from "./components/mcp/MCPView";
+import { MCPServerDetail } from "./components/mcp/MCPServerDetail";
 
 export default function App() {
   return (
@@ -20,6 +22,8 @@ export default function App() {
           <Route path="/tools/:name" element={<ToolDetail />} />
           <Route path="/secrets" element={<SecretsView />} />
           <Route path="/schedules" element={<SchedulesView />} />
+          <Route path="/mcp" element={<MCPView />} />
+          <Route path="/mcp/:name" element={<MCPServerDetail />} />
           <Route path="/system-prompt" element={<SystemPromptView />} />
         </Route>
       </Routes>

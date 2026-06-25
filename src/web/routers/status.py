@@ -41,6 +41,17 @@ def get_status(
         approved = sum(1 for t in all_tools if t.approved)
         pending = len(all_tools) - approved
 
+    # MCP servers / approved tools
+    mcp_servers = 0
+    mcp_tools_approved = 0
+    mcp_mgr = executor.mcp_manager
+    if mcp_mgr:
+        servers = mcp_mgr.list_servers()
+        mcp_servers = len(servers)
+        mcp_tools_approved = sum(
+            sum(1 for t in s.tools if t.approved) for s in servers
+        )
+
     # discord on/off
     discord_on = bool(sm and sm.get_secret("DISCORD_BOT_TOKEN"))
 
@@ -51,4 +62,6 @@ def get_status(
         secrets=secret_count,
         custom_tools_approved=approved,
         custom_tools_pending=pending,
+        mcp_servers=mcp_servers,
+        mcp_tools_approved=mcp_tools_approved,
     )

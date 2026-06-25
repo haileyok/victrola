@@ -39,6 +39,7 @@ class ToolContext:
         self._http_client = http_client
         self._store = store
         self._custom_tool_manager: Any | None = None
+        self._mcp_manager: Any | None = None
         self._secret_manager: Any | None = None
         self._scheduler: Any | None = None
         self._embedding_client: Any | None = None
@@ -73,6 +74,10 @@ class ToolContext:
         return self._custom_tool_manager
 
     @property
+    def mcp_manager(self) -> Any:
+        return self._mcp_manager
+
+    @property
     def secret_manager(self) -> Any:
         return self._secret_manager
 
@@ -101,6 +106,10 @@ class ToolRegistry:
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
+
+    def unregister(self, name: str) -> bool:
+        """Remove a tool from the registry. Returns True if it existed."""
+        return self._tools.pop(name, None) is not None
 
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)

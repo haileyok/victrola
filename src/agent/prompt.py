@@ -177,6 +177,18 @@ You can call multiple custom tools in a single `execute_code` block — just `aw
 """
 
 
+MCP_TOOLS_TEMPLATE = """
+# MCP Tools
+
+MCP (Model Context Protocol) tools are external tools provided by MCP servers. They appear in the `tools` namespace under their server name (e.g. `tools.fastmail.search_mail(...)`). Each tool was discovered from its server and individually approved by the operator.
+
+If an MCP tool returns a connection error, the server may be temporarily unavailable — inform the operator.
+
+Configured MCP servers:
+{mcp_servers_list}
+"""
+
+
 def build_system_prompt(
     self_doc: str = "",
     operator_doc: str = "",
@@ -184,6 +196,7 @@ def build_system_prompt(
     tool_docs: str = "",
     secret_names: list[str] | None = None,
     custom_tools_list: str = "",
+    mcp_servers_list: str = "",
 ) -> str:
     """
     builds the system prompt from static instructions and per-agent content.
@@ -215,5 +228,9 @@ def build_system_prompt(
     # approved custom tools list
     if custom_tools_list:
         parts.append(CUSTOM_TOOLS_LIST_TEMPLATE.format(custom_tools_list=custom_tools_list))
+
+    # MCP tools section
+    if mcp_servers_list:
+        parts.append(MCP_TOOLS_TEMPLATE.format(mcp_servers_list=mcp_servers_list))
 
     return "\n".join(parts)

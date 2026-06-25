@@ -1,4 +1,6 @@
 import type {
+  MCPServerDetail,
+  MCPServerSummary,
   MessageList,
   Schedule,
   Secret,
@@ -162,4 +164,49 @@ export const api = {
   // -- system prompt --
 
   getSystemPrompt: () => fetchJSON<SystemPrompt>(`${API_BASE}/system-prompt`),
+
+  // -- MCP --
+
+  listMCPServers: () => fetchJSON<MCPServerSummary[]>(`${API_BASE}/mcp/servers`),
+  createMCPServer: (config: {
+    name: string;
+    transport: string;
+    url?: string;
+    command?: string;
+    args?: string[];
+    auth_token_secret?: string;
+    env_secrets?: string[];
+    enabled?: boolean;
+  }) =>
+    fetchJSON<MCPServerSummary>(`${API_BASE}/mcp/servers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(config),
+    }),
+  getMCPServer: (name: string) =>
+    fetchJSON<MCPServerDetail>(`${API_BASE}/mcp/servers/${enc(name)}`),
+  deleteMCPServer: (name: string) =>
+    fetchJSON<void>(`${API_BASE}/mcp/servers/${enc(name)}`, { method: "DELETE" }),
+  connectMCPServer: (name: string) =>
+    fetchJSON<MCPServerDetail>(`${API_BASE}/mcp/servers/${enc(name)}/connect`, {
+      method: "POST",
+    }),
+  disconnectMCPServer: (name: string) =>
+    fetchJSON<MCPServerDetail>(`${API_BASE}/mcp/servers/${enc(name)}/disconnect`, {
+      method: "POST",
+    }),
+  refreshMCPServer: (name: string) =>
+    fetchJSON<MCPServerDetail>(`${API_BASE}/mcp/servers/${enc(name)}/refresh`, {
+      method: "POST",
+    }),
+  approveMCPTool: (serverName: string, toolName: string) =>
+    fetchJSON<{ message: string }>(
+      `${API_BASE}/mcp/servers/${enc(serverName)}/tools/${enc(toolName)}/approve`,
+      { method: "POST" },
+    ),
+  revokeMCPTool: (serverName: string, toolName: string) =>
+    fetchJSON<{ message: string }>(
+      `${API_BASE}/mcp/servers/${enc(serverName)}/tools/${enc(toolName)}/revoke`,
+      { method: "POST" },
+    ),
 };

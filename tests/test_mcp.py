@@ -1,0 +1,495 @@
+"""Tests for MCP server integration."""
+
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from src.tools.mcp import (
+    MCPConnection,
+    MCPManager,
+    MCPServerConfig,
+    MCPTool,
+    MCP_RKEY_PREFIX,
+)
+from src.tools.registry import Tool, ToolParameter, ToolContext, ToolRegistry
+
+
+# ---------------------------------------------------------------------------
+# Registry tests
+# ---------------------------------------------------------------------------
+
+
+def test_unregister_removes_tool_and_returns_true():
+    """unregister() should remove a tool and return True when it existed."""
+    reg = ToolRegistry()
+
+    async def handler(ctx, **kw):
+        pass
+
+    reg.register(Tool(name="test.tool", description="x", parameters=[], handler=handler))
+    assert reg.unregister("test.tool") is True
+    assert reg.get("test.tool") is None
+
+
+def test_unregister_returns_false_for_missing():
+    """unregister() should return False when the tool doesn't exist."""
+    reg = ToolRegistry()
+    assert reg.unregister("nonexistent") is False
+
+
+# ---------------------------------------------------------------------------
+# Dataclass serialization tests
+# ---------------------------------------------------------------------------
+
+
+def test_mcp_tool_serialization():
+    """MCPTool round-trips through to_dict / from_dict."""
+    tool = MCPTool(
+        name="search_mail",
+        description="Search mail",
+        input_schema={"type": "object", "properties": {"q": {"type": "string"}}},
+        approved=True,
+    )
+    d = tool.to_dict()
+    tool2 = MCPTool.from_dict(d)
+    assert tool2.name == "search_mail"
+    assert tool2.description == "Search mail"
+    assert tool2.approved is True
+    assert tool2.input_schema == tool.input_schema
+
+
+def test_mcp_server_config_serialization():
+    """MCPServerConfig round-trips through to_dict / from_dict."""
+    cfg = MCPServerConfig(
+        name="fastmail",
+        transport="sse",
+        url="https://api.fastmail.com/mcp",
+        auth_token_secret="FASTMAIL_API_TOKEN",
+        tools=[MCPTool(name="search", description="Search", input_schema={})],
+    )
+    d = cfg.to_dict()
+    cfg2 = MCPServerConfig.from_dict(d)
+    assert cfg2.name == "fastmail"
+    assert cfg2.transport == "sse"
+    assert cfg2.url == "https://api.fastmail.com/mcp"
+    assert cfg2.auth_token_secret == "FASTMAIL_API_TOKEN"
+    assert len(cfg2.tools) == 1
+    assert cfg2.tools[0].name == "search"
+
+
+def test_mcp_server_config_defaults():
+    """MCPServerConfig uses field(default_factory) for list fields."""
+    cfg = MCPServerConfig(name="test", transport="sse", url="https://example.com")
+    assert cfg.args == []
+    assert cfg.env_secrets == []
+    assert cfg.tools == []
+    assert cfg.enabled is True
+
+
+# ---------------------------------------------------------------------------
+# Schema conversion tests
+# ---------------------------------------------------------------------------
+
+
+def test_schema_to_parameters_simple_types():
+    """_schema_to_parameters converts JSON Schema to ToolParameter list."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Search query"},
+            "limit": {"type": "integer", "description": "Max results"},
+            "ratio": {"type": "number", "description": "Ratio"},
+            "verbose": {"type": "boolean", "description": "Verbose"},
+            "filter": {"type": "object", "description": "Filter obj"},
+            "tags": {"type": "array", "description": "Tags"},
+        },
+        "required": ["query", "limit"],
+    }
+    params = MCPManager._schema_to_parameters(schema)
+    assert len(params) == 6
+
+    by_name = {p.name: p for p in params}
+    assert by_name["query"].type == "string"
+    assert by_name["query"].required is True
+    assert by_name["limit"].type == "number"
+    assert by_name["limit"].required is True
+    assert by_name["ratio"].type == "number"
+    assert by_name["ratio"].required is False
+    assert by_name["verbose"].type == "boolean"
+    assert by_name["filter"].type == "object"
+    assert by_name["tags"].type == "array"
+
+
+def test_schema_to_parameters_empty():
+    """_schema_to_parameters returns [] for empty schema."""
+    assert MCPManager._schema_to_parameters({}) == []
+    assert MCPManager._schema_to_parameters({"type": "object"}) == []
+
+
+def test_schema_to_parameters_unknown_type_defaults_string():
+    """Unknown JSON Schema type falls back to 'string'."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "custom": {"type": "weird-type", "description": "Unknown"},
+        },
+    }
+    params = MCPManager._schema_to_parameters(schema)
+    assert params[0].type == "string"
+
+
+# ---------------------------------------------------------------------------
+# Tool name sanitization tests
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_tool_name():
+    """_sanitize_tool_name replaces non-identifier chars with underscore."""
+    assert MCPManager._sanitize_tool_name("search_mail") == "search_mail"
+    assert MCPManager._sanitize_tool_name("search.mail") == "search_mail"
+    assert MCPManager._sanitize_tool_name("foo-bar") == "foo_bar"
+    assert MCPManager._sanitize_tool_name("foo bar") == "foo_bar"
+
+
+# ---------------------------------------------------------------------------
+# MCPManager CRUD tests (with real Store)
+# ---------------------------------------------------------------------------
+
+
+async def _make_manager(tmp_path) -> MCPManager:
+    """Create an MCPManager backed by a real SQLite store."""
+    from src.store.store import Store
+
+    store = Store(path=tmp_path / "store.db")
+    await store.initialize()
+    registry = ToolRegistry()
+    return MCPManager(store=store, secret_manager=None, registry=registry), store
+
+
+@pytest.mark.asyncio
+async def test_create_server(tmp_path):
+    """create_server stores config and makes it visible via list_servers."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(name="testserver", transport="sse", url="https://example.com/mcp")
+    result = await manager.create_server(config)
+    assert "created" in result
+    assert len(manager.list_servers()) == 1
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_create_server_rejects_reserved_name(tmp_path):
+    """create_server rejects names that collide with built-in namespaces."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(name="memory", transport="sse", url="https://example.com")
+    result = await manager.create_server(config)
+    assert "reserved" in result.lower()
+    assert len(manager.list_servers()) == 0
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_create_server_rejects_invalid_name(tmp_path):
+    """create_server rejects names with invalid characters."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(name="bad.name", transport="sse", url="https://example.com")
+    result = await manager.create_server(config)
+    assert "invalid" in result.lower()
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_create_server_rejects_duplicate(tmp_path):
+    """create_server rejects duplicate server names."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(name="dup", transport="sse", url="https://example.com")
+    await manager.create_server(config)
+    result = await manager.create_server(config)
+    assert "already exists" in result
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_server(tmp_path):
+    """delete_server removes config from store and memory."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(name="todelete", transport="sse", url="https://example.com")
+    await manager.create_server(config)
+    assert len(manager.list_servers()) == 1
+
+    result = await manager.delete_server("todelete")
+    assert "deleted" in result
+    assert len(manager.list_servers()) == 0
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_load_servers(tmp_path):
+    """load_servers reads configs from DocumentStore on startup."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(
+        name="loaded",
+        transport="sse",
+        url="https://example.com",
+        tools=[MCPTool(name="tool1", description="d", input_schema={}, approved=True)],
+    )
+    await manager.create_server(config)
+
+    # create a fresh manager and load from store
+    registry2 = ToolRegistry()
+    manager2 = MCPManager(store=store, secret_manager=None, registry=registry2)
+    await manager2.load_servers()
+
+    servers = manager2.list_servers()
+    assert len(servers) == 1
+    assert servers[0].name == "loaded"
+    assert len(servers[0].tools) == 1
+    assert servers[0].tools[0].approved is True
+    await store.close()
+
+
+# ---------------------------------------------------------------------------
+# Approval / revocation tests (with mocked connection)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_approve_tool_registers_in_registry(tmp_path):
+    """approve_tool registers the tool in the TOOL_REGISTRY."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(name="srv", transport="sse", url="https://example.com")
+    config.tools = [
+        MCPTool(
+            name="search",
+            description="Search stuff",
+            input_schema={
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+                "required": ["q"],
+            },
+        )
+    ]
+    await manager.create_server(config)
+
+    result = await manager.approve_tool("srv", "search")
+    assert "approved" in result
+
+    # tool should be in registry
+    tool = manager._registry.get("srv.search")
+    assert tool is not None
+    assert tool.description == "Search stuff"
+    assert len(tool.parameters) == 1
+    assert tool.parameters[0].name == "q"
+
+    # tool should appear in generated TS types
+    ts = manager._registry.generate_typescript_types()
+    assert "srv" in ts
+    assert "search" in ts
+
+    # tool should appear in documentation
+    docs = manager._registry.generate_tool_documentation()
+    assert "srv.search" in docs
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_revoke_tool_unregisters_from_registry(tmp_path):
+    """revoke_tool removes the tool from the TOOL_REGISTRY."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(name="srv", transport="sse", url="https://example.com")
+    config.tools = [
+        MCPTool(name="search", description="Search", input_schema={})
+    ]
+    await manager.create_server(config)
+
+    await manager.approve_tool("srv", "search")
+    assert manager._registry.get("srv.search") is not None
+
+    result = await manager.revoke_tool("srv", "search")
+    assert "revoked" in result
+    assert manager._registry.get("srv.search") is None
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_call_tool_not_connected(tmp_path):
+    """call_tool returns error dict when server is not connected."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(name="srv", transport="sse", url="https://example.com")
+    await manager.create_server(config)
+
+    result = await manager.call_tool("srv", "search", {"q": "test"})
+    assert isinstance(result, dict)
+    assert "error" in result
+    assert "not connected" in result["error"]
+    await store.close()
+
+
+# ---------------------------------------------------------------------------
+# Tool naming tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tool_naming_uses_server_dot_tool(tmp_path):
+    """Approved MCP tools are registered as <server>.<tool> in the registry."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(name="fastmail", transport="sse", url="https://example.com")
+    config.tools = [
+        MCPTool(name="search_mail", description="Search", input_schema={})
+    ]
+    await manager.create_server(config)
+
+    await manager.approve_tool("fastmail", "search_mail")
+    tool = manager._registry.get("fastmail.search_mail")
+    assert tool is not None
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_tool_naming_sanitizes_dots(tmp_path):
+    """Tool names with dots are sanitized for registry but original name preserved for calls."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(name="srv", transport="sse", url="https://example.com")
+    config.tools = [
+        MCPTool(name="search.mail", description="Search", input_schema={})
+    ]
+    await manager.create_server(config)
+
+    await manager.approve_tool("srv", "search.mail")
+    # registered as sanitized name
+    assert manager._registry.get("srv.search_mail") is not None
+    # original name is NOT registered
+    assert manager._registry.get("srv.search.mail") is None
+    await store.close()
+
+
+# ---------------------------------------------------------------------------
+# ToolContext / ToolExecutor integration tests
+# ---------------------------------------------------------------------------
+
+
+def test_tool_context_has_mcp_manager_property():
+    """ToolContext exposes mcp_manager property (None by default)."""
+    ctx = ToolContext()
+    assert ctx.mcp_manager is None
+
+
+def test_executor_has_mcp_manager_property():
+    """ToolExecutor exposes mcp_manager public property."""
+    from src.tools.executor import ToolExecutor
+
+    ctx = ToolContext()
+    executor = ToolExecutor(registry=ToolRegistry(), ctx=ctx)
+    assert hasattr(executor, "mcp_manager")
+    assert executor.mcp_manager is None
+
+
+# ---------------------------------------------------------------------------
+# Web API tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_web_list_servers(tmp_path):
+    """GET /api/mcp/servers returns summaries with correct counts."""
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from src.web.dependencies import get_executor
+    from src.web.routers import mcp as mcp_router
+
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(name="webtest", transport="sse", url="https://example.com")
+    config.tools = [
+        MCPTool(name="t1", description="d1", input_schema={}, approved=True),
+        MCPTool(name="t2", description="d2", input_schema={}, approved=False),
+    ]
+    await manager.create_server(config)
+
+    # mock executor
+    executor = MagicMock()
+    executor.mcp_manager = manager
+
+    app = FastAPI()
+    app.state.executor = executor
+    app.dependency_overrides[get_executor] = lambda: executor
+    app.include_router(mcp_router.router, prefix="/api")
+
+    client = TestClient(app)
+    resp = client.get("/api/mcp/servers")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["name"] == "webtest"
+    assert data[0]["transport"] == "sse"
+    assert data[0]["tools_total"] == 2
+    assert data[0]["tools_approved"] == 1
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_web_create_server(tmp_path):
+    """POST /api/mcp/servers creates a server and returns summary."""
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from src.web.dependencies import get_executor
+    from src.web.routers import mcp as mcp_router
+
+    manager, store = await _make_manager(tmp_path)
+
+    executor = MagicMock()
+    executor.mcp_manager = manager
+
+    app = FastAPI()
+    app.state.executor = executor
+    app.dependency_overrides[get_executor] = lambda: executor
+    app.include_router(mcp_router.router, prefix="/api")
+
+    client = TestClient(app)
+    resp = client.post("/api/mcp/servers", json={
+        "name": "apitest",
+        "transport": "sse",
+        "url": "https://example.com/mcp",
+    })
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["name"] == "apitest"
+    assert data["connected"] is False
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_web_approve_tool(tmp_path):
+    """POST /api/mcp/servers/{name}/tools/{tool}/approve registers the tool."""
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from src.web.dependencies import get_executor
+    from src.web.routers import mcp as mcp_router
+
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(name="webtest", transport="sse", url="https://example.com")
+    config.tools = [
+        MCPTool(name="tool1", description="d1", input_schema={})
+    ]
+    await manager.create_server(config)
+
+    executor = MagicMock()
+    executor.mcp_manager = manager
+
+    app = FastAPI()
+    app.state.executor = executor
+    app.dependency_overrides[get_executor] = lambda: executor
+    app.include_router(mcp_router.router, prefix="/api")
+
+    client = TestClient(app)
+    resp = client.post("/api/mcp/servers/webtest/tools/tool1/approve")
+    assert resp.status_code == 200
+    assert "approved" in resp.json()["message"]
+
+    # verify tool was registered
+    assert manager._registry.get("webtest.tool1") is not None
+    await store.close()
