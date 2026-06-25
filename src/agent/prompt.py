@@ -177,7 +177,7 @@ Approved tools run with: network access, 256MB heap, 60s timeout, no filesystem 
 
 **You never see secret values. Only names.**
 
-The operator configures secrets through the TUI (e.g. `CALENDAR_URL = https://...`). You can ONLY see the list of names.
+The operator configures secrets through the web interface (e.g. `CALENDAR_URL = https://...`). You can ONLY see the list of names.
 
 **Available secret names:** {secret_names}
 
@@ -255,7 +255,7 @@ def build_system_prompt(
     if secret_names:
         names_str = ", ".join(f"`{n}`" for n in secret_names)
     else:
-        names_str = "None configured yet. The operator can add secrets via the TUI."
+        names_str = "None configured yet. The operator can add secrets via the web interface."
     parts.append(CUSTOM_TOOLS_TEMPLATE.format(secret_names=names_str))
 
     # approved custom tools list

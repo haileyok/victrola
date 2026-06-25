@@ -5,6 +5,7 @@ build/
 dist/
 wheels/
 *.egg-info
+src/*.egg-info/
 
 # Virtual environments
 .venv
@@ -15,3 +16,8 @@ wheels/
 /data
 
 victrola.log
+
+# Frontend (web/)
+web/node_modules/
+web/*.tsbuildinfo
+web/dist-tsconfig/

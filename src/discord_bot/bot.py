@@ -1,4 +1,4 @@
-"""Discord bot giving the operator a chat surface alongside the TUI.
+"""Discord bot giving the operator a chat surface alongside the web interface.
 
 Each thread inside the configured `DISCORD_SESSIONS_CHANNEL` is a chat session.
 - Operator posts at top level of the channel → bot creates a thread from that
@@ -7,7 +7,7 @@ Each thread inside the configured `DISCORD_SESSIONS_CHANNEL` is a chat session.
 
 Only the agent's final text response is posted to the thread. Tool activity
 (code the agent writes, tool results) is intentionally hidden from Discord —
-review those in the TUI if you need the full trace.
+review those in the web UI if you need the full trace.
 """
 
 from __future__ import annotations

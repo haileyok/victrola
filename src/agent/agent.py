@@ -622,7 +622,7 @@ class Agent:
         self._compact_threshold_chars = compact_threshold_chars
         self._umans_websearch_provider = umans_websearch_provider
 
-    # -- public read-only properties for TUI/Discord --
+    # -- public read-only properties for web/Discord --
 
     @property
     def client(self) -> AgentClient:
@@ -926,7 +926,7 @@ class Agent:
         """Send a message and get a response, handling tool calls.
 
         `conversation` is a list owned by the caller and mutated in place —
-        each surface (TUI, Discord, scheduler) maintains its own conversation
+        each surface (web UI, Discord, scheduler) maintains its own conversation
         list and passes it here. The agent does not hold shared conversation
         state.
 

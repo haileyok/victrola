@@ -30,7 +30,7 @@ class Config(BaseSettings):
 
     # display
     context_limit: int = 200_000
-    """approximate context window of the main model; used for the TUI ctx bar"""
+    """approximate context window of the main model; used for the web UI context bar"""
 
     # discord bot chat
     discord_sessions_channel: str = "victrola-sessions"

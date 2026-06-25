@@ -1,0 +1,165 @@
+import type {
+  MessageList,
+  Schedule,
+  Secret,
+  Session,
+  SessionList,
+  Status,
+  SystemPrompt,
+  ToolDetail,
+  ToolSummary,
+} from "./types";
+
+const API_BASE = "/api";
+
+export class ApiError extends Error {
+  status: number;
+  detail: unknown;
+  constructor(status: number, detail: unknown) {
+    const message = typeof detail === "string"
+      ? detail
+      : (detail as { message?: string })?.message || `HTTP ${status}`;
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
+  const resp = await fetch(url, init);
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({ detail: resp.statusText }));
+    throw new ApiError(resp.status, body.detail ?? body);
+  }
+  if (resp.status === 204) return undefined as T;
+  return resp.json();
+}
+
+function enc(value: string): string {
+  return encodeURIComponent(value);
+}
+
+// -- sessions --
+
+export const api = {
+  getStatus: () => fetchJSON<Status>(`${API_BASE}/status`),
+
+  listSessions: (limit = 50, cursor?: string) =>
+    fetchJSON<SessionList>(
+      `${API_BASE}/sessions?limit=${limit}${cursor ? `&cursor=${enc(cursor)}` : ""}`,
+    ),
+
+  createSession: (title = "") =>
+    fetchJSON<Session>(`${API_BASE}/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    }),
+
+  getSession: (id: string) => fetchJSON<Session>(`${API_BASE}/sessions/${enc(id)}`),
+
+  deleteSession: (id: string) =>
+    fetchJSON<void>(`${API_BASE}/sessions/${enc(id)}`, { method: "DELETE" }),
+
+  listMessages: (id: string, limit = 100, cursor?: string) =>
+    fetchJSON<MessageList>(
+      `${API_BASE}/sessions/${enc(id)}/messages?limit=${limit}${cursor ? `&cursor=${enc(cursor)}` : ""}`,
+    ),
+
+  // -- chat (SSE via fetch + ReadableStream) --
+
+  chat: (
+    sessionId: string,
+    message: string,
+    images?: { media_type: string; data: string }[],
+    onEvent?: (event: string, data: Record<string, unknown>) => void,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    return fetch(`${API_BASE}/sessions/${enc(sessionId)}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, images }),
+      signal,
+    }).then(async (resp) => {
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({ detail: resp.statusText }));
+        throw new ApiError(resp.status, body.detail ?? body);
+      }
+      const reader = resp.body?.getReader();
+      if (!reader) return;
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() || "";
+        for (const part of parts) {
+          const lines = part.split("\n");
+          let eventName = "message";
+          let dataStr = "{}";
+          for (const line of lines) {
+            if (line.startsWith("event: ")) eventName = line.slice(7);
+            else if (line.startsWith("data: ")) dataStr = line.slice(6);
+          }
+          if (onEvent) {
+            onEvent(eventName, JSON.parse(dataStr));
+          }
+        }
+      }
+    });
+  },
+
+  // -- tools --
+
+  listTools: () => fetchJSON<ToolSummary[]>(`${API_BASE}/tools`),
+  getTool: (name: string) => fetchJSON<ToolDetail>(`${API_BASE}/tools/${enc(name)}`),
+  approveTool: (name: string) =>
+    fetchJSON<{ message: string }>(`${API_BASE}/tools/${enc(name)}/approve`, {
+      method: "POST",
+    }),
+  revokeTool: (name: string) =>
+    fetchJSON<{ message: string }>(`${API_BASE}/tools/${enc(name)}/revoke`, {
+      method: "POST",
+    }),
+  deleteTool: (name: string) =>
+    fetchJSON<void>(`${API_BASE}/tools/${enc(name)}`, { method: "DELETE" }),
+
+  // -- secrets --
+
+  listSecrets: () => fetchJSON<Secret[]>(`${API_BASE}/secrets`),
+  setSecret: (name: string, value: string) =>
+    fetchJSON<Secret>(`${API_BASE}/secrets`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, value }),
+    }),
+  deleteSecret: (name: string) =>
+    fetchJSON<void>(`${API_BASE}/secrets/${enc(name)}`, { method: "DELETE" }),
+
+  // -- schedules --
+
+  listSchedules: () => fetchJSON<Schedule[]>(`${API_BASE}/schedules`),
+  createSchedule: (name: string, schedule: string, prompt: string) =>
+    fetchJSON<Schedule>(`${API_BASE}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, schedule, prompt }),
+    }),
+  enableSchedule: (name: string) =>
+    fetchJSON<Schedule>(`${API_BASE}/schedules/${enc(name)}/enable`, {
+      method: "POST",
+    }),
+  disableSchedule: (name: string) =>
+    fetchJSON<Schedule>(`${API_BASE}/schedules/${enc(name)}/disable`, {
+      method: "POST",
+    }),
+  deleteSchedule: (name: string) =>
+    fetchJSON<void>(`${API_BASE}/schedules/${enc(name)}`, { method: "DELETE" }),
+
+  // -- system prompt --
+
+  getSystemPrompt: () => fetchJSON<SystemPrompt>(`${API_BASE}/system-prompt`),
+};

@@ -31,7 +31,7 @@ class ToolExecutor:
         self._secret_manager: Any | None = None
         self._scheduler: Any | None = None
 
-    # -- public read-only properties for TUI/Discord/main.py --
+    # -- public read-only properties for web/Discord/main.py --
 
     @property
     def store(self) -> Any:
