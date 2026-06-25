@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Any
 
@@ -27,6 +28,8 @@ class VictrolaApp(App):
         self.agent = agent
         self.conversation_manager: Any = None
         self.executor = executor
+        self._scheduler_task: asyncio.Task | None = None
+        self._bot_task: asyncio.Task | None = None
 
     async def on_mount(self) -> None:
         """Initialize all async services then show session list."""
@@ -75,10 +78,15 @@ class VictrolaApp(App):
 
         # wire scheduler callback and start in background
         if self.executor._scheduler:
-            import asyncio
-
             self.executor._scheduler._on_fire = self._on_schedule_fire
-            asyncio.create_task(self.executor._scheduler.run())
+
+            async def _run_scheduler() -> None:
+                try:
+                    await self.executor._scheduler.run()
+                except Exception:
+                    logger.exception("Scheduler background task crashed")
+
+            self._scheduler_task = asyncio.create_task(_run_scheduler())
             logger.info("Scheduler started in background")
 
         # start Discord chat bot if DISCORD_BOT_TOKEN is configured
@@ -87,9 +95,13 @@ class VictrolaApp(App):
 
             bot = _build_discord_bot(self.executor, self.agent)
             if bot is not None:
-                import asyncio
+                async def _run_bot() -> None:
+                    try:
+                        await bot.start()
+                    except Exception:
+                        logger.exception("Discord bot background task crashed")
 
-                asyncio.create_task(bot.start())
+                self._bot_task = asyncio.create_task(_run_bot())
                 logger.info("Discord bot started in background")
         except Exception:
             logger.exception("Discord bot failed to start")
@@ -100,6 +112,19 @@ class VictrolaApp(App):
 
     async def on_unmount(self) -> None:
         """Clean up resources on shutdown."""
+        # Cancel background tasks
+        for task in (self._scheduler_task, self._bot_task):
+            if task is not None and not task.done():
+                task.cancel()
+        for task in (self._scheduler_task, self._bot_task):
+            if task is not None:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("Background task raised on shutdown")
+        # Close agent resources
         try:
             await self.agent.aclose()
         except Exception:
