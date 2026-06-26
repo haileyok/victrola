@@ -1166,8 +1166,9 @@ async def test_health_check_reconnects_dead_connection(tmp_path):
     assert result is True
     assert "srv" in manager._connections
     assert manager._connections["srv"] is healthy_conn
-    # dead_conn should have been disconnected
-    dead_conn.disconnect.assert_awaited()
+    # dead_conn should have been popped (non-blocking disconnect — no await)
+    assert dead_conn._session is None
+    assert dead_conn._stack is None
 
     await manager.stop_health_monitor()
     await manager.disconnect_server("srv")
@@ -1517,13 +1518,17 @@ async def test_call_tool_auto_reconnect_does_not_block(tmp_path):
     config = MCPServerConfig(name="srv", transport="sse", url="https://example.com")
     await manager.create_server(config)
 
-    # First connection: disconnect hangs forever, call_tool fails
+    # First connection: disconnect hangs and resists cancellation, call_tool fails
     mock_conn = MagicMock()
     mock_conn.is_connected = True
     mock_conn.connect = AsyncMock()
 
     async def hang_disconnect():
-        await asyncio.sleep(9999)
+        try:
+            await asyncio.sleep(9999)
+        except asyncio.CancelledError:
+            # Simulate a transport that doesn't respond to cancellation
+            await asyncio.sleep(9999)
 
     mock_conn.disconnect = AsyncMock(side_effect=hang_disconnect)
     mock_conn.list_tools = AsyncMock(return_value=[])

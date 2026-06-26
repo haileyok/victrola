@@ -534,10 +534,19 @@ class MCPManager:
         """Disconnect and reconnect a server under its lock.
         Uses auto=True (short OAuth callback timeout). Returns True on success.
 
-        The entire disconnect+connect sequence is bounded by _RECONNECT_TIMEOUT
-        so a hanging stack-close or hung OAuth round-trip can't stall the caller.
+        The entire disconnect+connect sequence is bounded by _RECONNECT_TIMEOUT.
+        On timeout, the connection is popped from _connections without awaiting
+        cleanup — the cancelled task's cleanup runs independently and the stale
+        connection is left for GC.
         """
         async with self._get_lock(name):
+            # Guard: a manual disconnect or delete may have already removed
+            # the connection between the health check failure and here.
+            if name not in self._connections:
+                return False
+            config = self._servers.get(name)
+            if config is None or not config.enabled:
+                return False
             try:
                 await asyncio.wait_for(
                     self._reconnect_server_impl(name),
@@ -546,8 +555,12 @@ class MCPManager:
                 return True
             except asyncio.TimeoutError:
                 logger.warning("Auto-reconnect timed out for '%s'", name)
-                if name in self._connections:
-                    await self._disconnect_server_impl(name)
+                # Pop without awaiting cleanup — the wait_for cancellation may
+                # still be in progress and awaiting disconnect again could hang.
+                conn = self._connections.pop(name, None)
+                if conn:
+                    conn._session = None
+                    conn._stack = None
                 return False
             except Exception as e:
                 logger.warning("Auto-reconnect failed for '%s': %s", name, e)
@@ -556,9 +569,17 @@ class MCPManager:
                 return False
 
     async def _reconnect_server_impl(self, name: str) -> None:
-        """Disconnect and reconnect. Caller must hold the per-server lock."""
-        if name in self._connections:
-            await self._disconnect_server_impl(name)
+        """Disconnect and reconnect. Caller must hold the per-server lock.
+
+        The disconnect is done by popping the connection and nulling its
+        session/stack without awaiting conn.disconnect() — this prevents a
+        hung transport close from blocking the reconnect. The stale
+        connection is left for GC.
+        """
+        conn = self._connections.pop(name, None)
+        if conn:
+            conn._session = None
+            conn._stack = None
         await self._connect_server_impl(name, auto=True)
 
     async def connect_all(self) -> None:
@@ -757,8 +778,13 @@ class MCPManager:
                         timeout=_RECONNECT_TIMEOUT,
                     )
                 except asyncio.TimeoutError:
-                    if server_name in self._connections:
-                        await self._disconnect_server_impl(server_name)
+                    # Pop without awaiting cleanup — the wait_for cancellation
+                    # may still be in progress and awaiting disconnect again
+                    # could hang on a dead transport.
+                    conn = self._connections.pop(server_name, None)
+                    if conn:
+                        conn._session = None
+                        conn._stack = None
                     return {"error": f"MCP tool call failed: {e}. Auto-reconnect timed out."}
                 except Exception as reconnect_err:
                     if server_name in self._connections:
