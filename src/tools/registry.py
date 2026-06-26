@@ -155,17 +155,18 @@ class ToolRegistry:
             # positional slot, unwrap it. To distinguish a real envelope from
             # a legitimate object-typed first parameter, only unwrap when the
             # first param is NOT object-typed — a dict value for a scalar param
-            # is clearly an envelope, not the intended value. Additionally
-            # require the outer key itself to appear inside the nested dict.
-            # Extra keys the model invented are silently dropped so the
-            # downstream tool never sees them.
+            # is clearly an envelope, not the intended value. Require at least
+            # one key in the nested object to match a declared param so we
+            # don't unwrap a dict that happens to be a legitimate scalar value
+            # (e.g. a JSON object stored as a string and parsed). Extra keys
+            # the model invented are silently dropped so the downstream tool
+            # never sees them.
             first_param = tool.parameters[0] if tool.parameters else None
             first_is_object = first_param is not None and first_param.type == "object"
             if (
                 isinstance(val, dict)
                 and param_names
                 and not first_is_object
-                and outer_key in val
                 and set(val.keys()) & param_names
             ):
                 params = {k: v for k, v in val.items() if k in param_names}
