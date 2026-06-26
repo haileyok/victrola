@@ -147,15 +147,23 @@ class ToolRegistry:
 
         if len(params) == 1:
             param_names = {p.name for p in tool.parameters}
+            outer_key = next(iter(params))
             val = next(iter(params.values()))
             # The generated TypeScript stubs use positional parameters, but
             # LLM agents frequently call tools with a single object argument
             # (the natural MCP pattern). When that object lands in the first
-            # positional slot, unwrap it. Accept the object as long as at
-            # least one key matches a declared parameter — extra keys the
-            # model invented are silently dropped so the downstream tool
-            # never sees them.
-            if isinstance(val, dict) and param_names and set(val.keys()) & param_names:
+            # positional slot, unwrap it. To distinguish a real envelope from
+            # a legitimate object-typed first parameter, require the outer key
+            # itself to appear inside the nested dict — the agent specifies
+            # the first param's name as a key when building the object.
+            # Extra keys the model invented are silently dropped so the
+            # downstream tool never sees them.
+            if (
+                isinstance(val, dict)
+                and param_names
+                and outer_key in val
+                and set(val.keys()) & param_names
+            ):
                 params = {k: v for k, v in val.items() if k in param_names}
 
         return await tool.handler(ctx, **params)

@@ -202,6 +202,46 @@ async def test_execute_does_not_unwrap_when_tool_has_no_params():
     assert received == {"data": {"x": 1}}
 
 
+@pytest.mark.asyncio
+async def test_execute_does_not_unwrap_object_param_with_overlapping_keys():
+    """When the first param is an object type and its value contains a key
+    that matches a sibling param name, the unwrap should NOT fire — the
+    object is a legitimate parameter value, not an argument envelope.
+
+    Example: tool has params (filter: object, limit: number). The agent
+    calls with filter={"status": "open", "limit": 5}. The wire message is
+    {"filter": {"status": "open", "limit": 5}}. Without the outer_key check,
+    "limit" in the nested dict would trigger unwrap and silently discard the
+    filter object, leaving only {"limit": 5}.
+    """
+    reg = ToolRegistry()
+    received = {}
+
+    async def handler(ctx, **kw):
+        received.update(kw)
+        return "ok"
+
+    reg.register(
+        Tool(
+            name="test.tool",
+            description="test",
+            parameters=[
+                ToolParameter(name="filter", type="object", description="filter", required=True),
+                ToolParameter(name="limit", type="number", description="limit", required=False),
+            ],
+            handler=handler,
+        )
+    )
+
+    # "filter" is NOT a key inside the nested dict, so this is a legitimate
+    # object value — don't unwrap
+    await reg.execute(
+        None, "test.tool", {"filter": {"status": "open", "limit": 5}}
+    )
+
+    assert received == {"filter": {"status": "open", "limit": 5}}
+
+
 # ---------------------------------------------------------------------------
 # Dataclass serialization tests
 # ---------------------------------------------------------------------------
