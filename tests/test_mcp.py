@@ -39,6 +39,210 @@ def test_unregister_returns_false_for_missing():
 
 
 # ---------------------------------------------------------------------------
+# Registry execute() — single-object unwrap tests
+# ---------------------------------------------------------------------------
+
+# The generated TypeScript stubs use positional parameters, but LLM agents
+# frequently call tools with a single object argument. When that object lands
+# in the first positional slot, registry.execute() must unwrap it. These tests
+# cover the unwrap logic in ToolRegistry.execute().
+
+
+@pytest.mark.asyncio
+async def test_execute_unwraps_single_object_with_matching_keys():
+    """When the agent passes a single object whose keys all match declared
+    params, execute() should unwrap it and pass each key as a kwarg."""
+    reg = ToolRegistry()
+    received = {}
+
+    async def handler(ctx, **kw):
+        received.update(kw)
+        return "ok"
+
+    reg.register(
+        Tool(
+            name="test.echo",
+            description="echo",
+            parameters=[
+                ToolParameter(name="msg", type="string", description="msg", required=True),
+                ToolParameter(name="count", type="number", description="count", required=False),
+            ],
+            handler=handler,
+        )
+    )
+
+    # Simulate what the TS stub sends when the agent calls
+    # tools.test.echo({ msg: "hi", count: 3 })
+    # — the object lands in the "msg" positional slot
+    await reg.execute(None, "test.echo", {"msg": {"msg": "hi", "count": 3}})
+
+    assert received == {"msg": "hi", "count": 3}
+
+
+@pytest.mark.asyncio
+async def test_execute_unwraps_single_object_with_extra_keys():
+    """When the agent passes a single object with keys that don't match any
+    declared param (e.g. the model invented params), execute() should unwrap
+    the known keys and silently drop the unknown ones rather than failing."""
+    reg = ToolRegistry()
+    received = {}
+
+    async def handler(ctx, **kw):
+        received.update(kw)
+        return "ok"
+
+    reg.register(
+        Tool(
+            name="ubereats.add_to_cart",
+            description="add to cart",
+            parameters=[
+                ToolParameter(name="item_name", type="string", description="item name", required=False),
+                ToolParameter(name="quantity", type="number", description="qty", required=False),
+                ToolParameter(name="restaurant_url", type="string", description="url", required=False),
+            ],
+            handler=handler,
+        )
+    )
+
+    # The agent passed item_uuid and item_options which don't exist in the
+    # tool's schema. The unwrap should still work — drop the unknown keys.
+    nested = {
+        "item_name": "Breakfast Bagels",
+        "item_uuid": "a14c419e-...",  # not in schema
+        "restaurant_url": "house-of-bagels-colma/abc",
+        "item_options": [{"group_uuid": "..."}],  # not in schema
+    }
+    await reg.execute(None, "ubereats.add_to_cart", {"item_name": nested})
+
+    assert received == {
+        "item_name": "Breakfast Bagels",
+        "restaurant_url": "house-of-bagels-colma/abc",
+    }
+    assert "item_uuid" not in received
+    assert "item_options" not in received
+
+
+@pytest.mark.asyncio
+async def test_execute_unwraps_single_object_partial_overlap():
+    """When only some keys in the nested object match declared params, unwrap
+    and pass only the matching keys."""
+    reg = ToolRegistry()
+    received = {}
+
+    async def handler(ctx, **kw):
+        received.update(kw)
+        return "ok"
+
+    reg.register(
+        Tool(
+            name="test.tool",
+            description="test",
+            parameters=[
+                ToolParameter(name="a", type="string", description="a", required=True),
+            ],
+            handler=handler,
+        )
+    )
+
+    # Only "a" matches; "b" and "c" are unknown
+    await reg.execute(None, "test.tool", {"a": {"a": 1, "b": 2, "c": 3}})
+
+    assert received == {"a": 1}
+
+
+@pytest.mark.asyncio
+async def test_execute_does_not_unwrap_when_no_keys_match():
+    """If the single object has no keys matching declared params, it should
+    be passed through as-is to the first parameter (not unwrapped)."""
+    reg = ToolRegistry()
+    received = {}
+
+    async def handler(ctx, **kw):
+        received.update(kw)
+        return "ok"
+
+    reg.register(
+        Tool(
+            name="test.tool",
+            description="test",
+            parameters=[
+                ToolParameter(name="a", type="string", description="a", required=True),
+            ],
+            handler=handler,
+        )
+    )
+
+    # "x" and "y" don't match param "a" — pass through as-is
+    await reg.execute(None, "test.tool", {"a": {"x": 1, "y": 2}})
+
+    assert received == {"a": {"x": 1, "y": 2}}
+
+
+@pytest.mark.asyncio
+async def test_execute_does_not_unwrap_when_tool_has_no_params():
+    """If the tool has no declared parameters, don't try to unwrap."""
+    reg = ToolRegistry()
+    received = {}
+
+    async def handler(ctx, **kw):
+        received.update(kw)
+        return "ok"
+
+    reg.register(
+        Tool(
+            name="test.tool",
+            description="test",
+            parameters=[],
+            handler=handler,
+        )
+    )
+
+    await reg.execute(None, "test.tool", {"data": {"x": 1}})
+
+    assert received == {"data": {"x": 1}}
+
+
+@pytest.mark.asyncio
+async def test_execute_does_not_unwrap_object_param_with_overlapping_keys():
+    """When the first param is an object type and its value contains a key
+    that matches a sibling param name, the unwrap should NOT fire — the
+    object is a legitimate parameter value, not an argument envelope.
+
+    Example: tool has params (filter: object, limit: number). The agent
+    calls with filter={"status": "open", "limit": 5}. The wire message is
+    {"filter": {"status": "open", "limit": 5}}. Without the outer_key check,
+    "limit" in the nested dict would trigger unwrap and silently discard the
+    filter object, leaving only {"limit": 5}.
+    """
+    reg = ToolRegistry()
+    received = {}
+
+    async def handler(ctx, **kw):
+        received.update(kw)
+        return "ok"
+
+    reg.register(
+        Tool(
+            name="test.tool",
+            description="test",
+            parameters=[
+                ToolParameter(name="filter", type="object", description="filter", required=True),
+                ToolParameter(name="limit", type="number", description="limit", required=False),
+            ],
+            handler=handler,
+        )
+    )
+
+    # "filter" is NOT a key inside the nested dict, so this is a legitimate
+    # object value — don't unwrap
+    await reg.execute(
+        None, "test.tool", {"filter": {"status": "open", "limit": 5}}
+    )
+
+    assert received == {"filter": {"status": "open", "limit": 5}}
+
+
+# ---------------------------------------------------------------------------
 # Dataclass serialization tests
 # ---------------------------------------------------------------------------
 
