@@ -209,7 +209,13 @@ MCP_TOOL_CATALOG_TEMPLATE = """
 
 MCP (Model Context Protocol) tools are external tools provided by MCP servers. They appear in the `tools` namespace under their server name (e.g. `tools.github.create_issue(...)`). Each tool was discovered from its server and individually approved by the operator.
 
-Only a compact catalog is shown below — **call `system.get_tool_docs({{ names: ["server.tool"] }})` to get full parameter details before using an MCP tool.** You only need to do this once per tool per conversation; the results stay in your context.
+Only a compact catalog is shown below — **call `tools.system.get_tool_docs({{ names: ["server.tool"] }})` from inside `execute_code` to get full parameter details before using an MCP tool.** You only need to do this once per tool per conversation; the results stay in your context.
+
+Example:
+```typescript
+const docs = await tools.system.get_tool_docs({ names: ["github.create_issue"] });
+output({ docs });
+```
 
 If an MCP tool returns a connection error, the server may be temporarily unavailable — inform the operator.
 

@@ -98,6 +98,20 @@ def test_mcp_catalog_sanitizes_descriptions():
     assert "```" not in catalog
 
 
+def test_mcp_catalog_sanitizes_indented_headings():
+    """Catalog should strip headings even when preceded by whitespace."""
+    reg = ToolRegistry()
+    reg.register(_make_tool(
+        "evil.indented",
+        description="   ## Indented Heading\n   ### Another indented",
+        source="mcp",
+    ))
+
+    catalog = reg.generate_mcp_tool_catalog()
+    assert "## Indented Heading" not in catalog
+    assert "### Another indented" not in catalog
+
+
 # ---------------------------------------------------------------------------
 # Test 5: generate_mcp_tool_catalog() handles empty/None descriptions
 # ---------------------------------------------------------------------------

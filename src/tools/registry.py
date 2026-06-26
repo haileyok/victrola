@@ -357,8 +357,10 @@ class ToolRegistry:
         lines = text.split("\n")
         sanitized_lines = []
         for line in lines:
-            # strip leading # markers that could inject fake headings
-            stripped = line.lstrip("#")
+            # strip leading whitespace then # markers that could inject
+            # fake headings (handles indented headings like "  ## evil")
+            stripped = line.lstrip()
+            stripped = stripped.lstrip("#")
             sanitized_lines.append(stripped)
         result = "\n".join(sanitized_lines)
         # neutralize backtick-fenced code blocks
