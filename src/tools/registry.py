@@ -148,8 +148,15 @@ class ToolRegistry:
         if len(params) == 1:
             param_names = {p.name for p in tool.parameters}
             val = next(iter(params.values()))
-            if isinstance(val, dict) and set(val.keys()) <= param_names:  # ignore: type
-                params = val  # type: ignore
+            # The generated TypeScript stubs use positional parameters, but
+            # LLM agents frequently call tools with a single object argument
+            # (the natural MCP pattern). When that object lands in the first
+            # positional slot, unwrap it. Accept the object as long as at
+            # least one key matches a declared parameter — extra keys the
+            # model invented are silently dropped so the downstream tool
+            # never sees them.
+            if isinstance(val, dict) and param_names and set(val.keys()) & param_names:
+                params = {k: v for k, v in val.items() if k in param_names}
 
         return await tool.handler(ctx, **params)
 
