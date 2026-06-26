@@ -38,6 +38,7 @@ _RESERVED_NAMESPACES = {
     "summarize",
     "image",
     "custom_tools",
+    "system",
 }
 
 # TypeScript/JavaScript reserved words that must not be used as identifiers
