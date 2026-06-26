@@ -483,8 +483,29 @@ class MCPManager:
         except BaseException:
             # Clean up the connection if discovery or registration failed
             # so we don't leave a live session with no tools registered.
-            await self._disconnect_server_impl(name)
+            # Use detached cleanup so a hung transport close can't block
+            # the caller (same pattern as auto-reconnect).
+            self._cleanup_connection(name)
             raise
+
+    def _cleanup_connection(self, name: str) -> None:
+        """Unregister tools, pop connection, and schedule background cleanup.
+
+        Synchronous tool unregistration + non-blocking transport close.
+        Caller must hold the per-server lock (or be in a context where no
+        other task can touch this server).
+        """
+        config = self._servers.get(name)
+        if config:
+            for tool in config.tools:
+                if tool.approved:
+                    self._registry.unregister(
+                        f"{name}.{self._sanitize_tool_name(tool.name)}"
+                    )
+        conn = self._connections.pop(name, None)
+        if conn:
+            conn._session = None
+            asyncio.create_task(_detached_disconnect(conn))
 
     async def disconnect_server(self, name: str) -> None:
         """Disconnect a server and unregister its tools."""
