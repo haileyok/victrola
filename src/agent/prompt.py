@@ -213,8 +213,8 @@ Only a compact catalog is shown below — **call `tools.system.get_tool_docs({{ 
 
 Example:
 ```typescript
-const docs = await tools.system.get_tool_docs({ names: ["github.create_issue"] });
-output({ docs });
+const docs = await tools.system.get_tool_docs({{ names: ["github.create_issue"] }});
+output({{ docs }});
 ```
 
 If an MCP tool returns a connection error, the server may be temporarily unavailable — inform the operator.

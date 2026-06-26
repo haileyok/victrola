@@ -112,6 +112,19 @@ def test_mcp_catalog_sanitizes_indented_headings():
     assert "### Another indented" not in catalog
 
 
+def test_mcp_catalog_preserves_hash_in_non_heading_text():
+    """Catalog should not strip # from legitimate text like '#hashtag'."""
+    reg = ToolRegistry()
+    reg.register(_make_tool(
+        "social.tag",
+        description="#hashtag search tool",
+        source="mcp",
+    ))
+
+    catalog = reg.generate_mcp_tool_catalog()
+    assert "#hashtag" in catalog
+
+
 # ---------------------------------------------------------------------------
 # Test 5: generate_mcp_tool_catalog() handles empty/None descriptions
 # ---------------------------------------------------------------------------
@@ -376,3 +389,21 @@ def test_tool_source_can_be_set_to_mcp():
         source="mcp",
     )
     assert tool.source == "mcp"
+
+
+def test_build_system_prompt_renders_mcp_catalog():
+    """build_system_prompt should render the MCP catalog without KeyError.
+
+    The MCP_TOOL_CATALOG_TEMPLATE contains a TypeScript example with
+    literal braces that must be escaped as {{ }} to survive .format().
+    """
+    from src.agent.prompt import build_system_prompt
+
+    result = build_system_prompt(
+        mcp_tool_catalog="## github\n- `github.create_issue` — Create issue"
+    )
+    assert "MCP Tool Catalog" in result
+    assert "github.create_issue" in result
+    # The TypeScript example should render with literal braces
+    assert '{ names: ["github.create_issue"] }' in result
+    assert "{ docs }" in result

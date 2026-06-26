@@ -357,10 +357,19 @@ class ToolRegistry:
         lines = text.split("\n")
         sanitized_lines = []
         for line in lines:
-            # strip leading whitespace then # markers that could inject
-            # fake headings (handles indented headings like "  ## evil")
+            # strip leading whitespace then remove markdown heading
+            # syntax (1-6 # followed by space or end-of-line). This
+            # avoids stripping # from legitimate text like "#hashtag".
             stripped = line.lstrip()
-            stripped = stripped.lstrip("#")
+            # count leading # characters
+            hash_count = 0
+            while hash_count < len(stripped) and stripped[hash_count] == "#":
+                hash_count += 1
+            if hash_count > 0 and hash_count <= 6:
+                rest = stripped[hash_count:]
+                # it's a heading only if # is followed by space or EOL
+                if not rest or rest[0] in (" ", "\t"):
+                    stripped = rest.lstrip()
             sanitized_lines.append(stripped)
         result = "\n".join(sanitized_lines)
         # neutralize backtick-fenced code blocks
