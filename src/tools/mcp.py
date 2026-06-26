@@ -257,7 +257,22 @@ class MCPConnection:
         except BaseException:
             # Clean up the exit stack if any step failed — otherwise
             # transports/subprocesses entered into the stack would leak.
-            await self.disconnect()
+            # Bound the cleanup so a hung transport close can't block the
+            # caller indefinitely (e.g. during wait_for cancellation in
+            # auto-reconnect). If the transport's aclose() is truly
+            # cancellation-resistant, the wait_for itself may delay — this
+            # is an asyncio limitation. The session/stack are nulled
+            # regardless so the connection is marked dead.
+            try:
+                await asyncio.wait_for(
+                    self.disconnect(), timeout=_DETACHED_DISCONNECT_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                logger.warning("disconnect() timed out during connect cleanup — abandoning transport")
+                self._session = None
+                self._stack = None
+            except Exception:
+                logger.warning("Error during connect cleanup disconnect", exc_info=True)
             raise
 
     async def disconnect(self) -> None:
