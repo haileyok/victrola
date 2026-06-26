@@ -1166,9 +1166,11 @@ async def test_health_check_reconnects_dead_connection(tmp_path):
     assert result is True
     assert "srv" in manager._connections
     assert manager._connections["srv"] is healthy_conn
-    # dead_conn should have been popped (non-blocking disconnect — no await)
-    assert dead_conn._session is None
-    assert dead_conn._stack is None
+    # dead_conn.disconnect should be called by the background cleanup task
+    # Yield to let the background task run
+    import asyncio
+    await asyncio.sleep(0)
+    dead_conn.disconnect.assert_awaited()
 
     await manager.stop_health_monitor()
     await manager.disconnect_server("srv")
@@ -1556,13 +1558,16 @@ async def test_call_tool_auto_reconnect_does_not_block(tmp_path):
     import src.tools.mcp as mcp_mod
 
     original_timeout = mcp_mod._RECONNECT_TIMEOUT
+    original_detach_timeout = mcp_mod._DETACHED_DISCONNECT_TIMEOUT
     mcp_mod._RECONNECT_TIMEOUT = 0.5
+    mcp_mod._DETACHED_DISCONNECT_TIMEOUT = 0.5
     try:
         with patch("src.tools.mcp.MCPConnection", side_effect=conn_factory):
             await manager.connect_server("srv")
             result = await manager.call_tool("srv", "search", {"q": "test"})
     finally:
         mcp_mod._RECONNECT_TIMEOUT = original_timeout
+        mcp_mod._DETACHED_DISCONNECT_TIMEOUT = original_detach_timeout
 
     assert isinstance(result, dict)
     assert "error" in result

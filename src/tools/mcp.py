@@ -66,6 +66,23 @@ _CALL_TIMEOUT = 60.0
 # Bounds the full OAuth flow (client registration, token exchange, callback).
 _RECONNECT_TIMEOUT = 20.0
 
+# Best-effort timeout for closing an old transport during reconnect.
+# If cleanup doesn't finish in this time, the background task is abandoned.
+_DETACHED_DISCONNECT_TIMEOUT = 10.0
+
+
+async def _detached_disconnect(conn: "MCPConnection") -> None:
+    """Close a connection in the background with a best-effort timeout.
+
+    Prevents a hung transport close (cancellation-resistant aclose) from
+    blocking the caller. If the close doesn't finish in time, the task
+    is abandoned — the stale connection leaks but the caller proceeds.
+    """
+    try:
+        await asyncio.wait_for(conn.disconnect(), timeout=_DETACHED_DISCONNECT_TIMEOUT)
+    except Exception:
+        logger.warning("Detached disconnect failed (abandoned)", exc_info=True)
+
 
 @dataclass
 class MCPTool:
@@ -555,12 +572,12 @@ class MCPManager:
                 return True
             except asyncio.TimeoutError:
                 logger.warning("Auto-reconnect timed out for '%s'", name)
-                # Pop without awaiting cleanup — the wait_for cancellation may
-                # still be in progress and awaiting disconnect again could hang.
+                # Pop and schedule background cleanup. The wait_for cancellation
+                # may still be in progress; don't await disconnect synchronously.
                 conn = self._connections.pop(name, None)
                 if conn:
                     conn._session = None
-                    conn._stack = None
+                    asyncio.create_task(_detached_disconnect(conn))
                 return False
             except Exception as e:
                 logger.warning("Auto-reconnect failed for '%s': %s", name, e)
@@ -571,15 +588,15 @@ class MCPManager:
     async def _reconnect_server_impl(self, name: str) -> None:
         """Disconnect and reconnect. Caller must hold the per-server lock.
 
-        The disconnect is done by popping the connection and nulling its
-        session/stack without awaiting conn.disconnect() — this prevents a
-        hung transport close from blocking the reconnect. The stale
-        connection is left for GC.
+        The old connection is popped immediately and its cleanup is scheduled
+        as a background task with a best-effort timeout. This prevents a hung
+        transport close from blocking the reconnect while still attempting
+        proper resource cleanup.
         """
         conn = self._connections.pop(name, None)
         if conn:
             conn._session = None
-            conn._stack = None
+            asyncio.create_task(_detached_disconnect(conn))
         await self._connect_server_impl(name, auto=True)
 
     async def connect_all(self) -> None:
@@ -778,13 +795,13 @@ class MCPManager:
                         timeout=_RECONNECT_TIMEOUT,
                     )
                 except asyncio.TimeoutError:
-                    # Pop without awaiting cleanup — the wait_for cancellation
-                    # may still be in progress and awaiting disconnect again
-                    # could hang on a dead transport.
+                    # Pop and schedule background cleanup. The wait_for
+                    # cancellation may still be in progress; don't await
+                    # disconnect synchronously.
                     conn = self._connections.pop(server_name, None)
                     if conn:
                         conn._session = None
-                        conn._stack = None
+                        asyncio.create_task(_detached_disconnect(conn))
                     return {"error": f"MCP tool call failed: {e}. Auto-reconnect timed out."}
                 except Exception as reconnect_err:
                     if server_name in self._connections:
