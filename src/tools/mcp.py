@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import AnyUrl
 
+from src.config import CONFIG
 from src.tools.registry import Tool, ToolParameter
 
 if TYPE_CHECKING:
@@ -60,6 +61,10 @@ _CONNECT_TIMEOUT = 30.0
 
 # Bounded timeout for individual tool calls and list_tools
 _CALL_TIMEOUT = 60.0
+
+# Bounded timeout for auto-reconnection (disconnect + reconnect).
+# Bounds the full OAuth flow (client registration, token exchange, callback).
+_RECONNECT_TIMEOUT = 20.0
 
 
 @dataclass
@@ -197,6 +202,7 @@ class MCPConnection:
                         headers=headers or None,
                         auth=auth,
                         timeout=30.0,
+                        sse_read_timeout=float(CONFIG.mcp_sse_read_timeout_seconds),
                     )
                 )
                 # streamablehttp_client returns (read, write, get_session_id)
@@ -255,6 +261,13 @@ class MCPConnection:
             self._session.list_tools(), timeout=_CALL_TIMEOUT
         )
         return result.tools
+
+    async def send_ping(self) -> None:
+        """Send a health-check ping. Raises if the connection is dead."""
+        session = self._session
+        if session is None:
+            raise RuntimeError("Not connected")
+        await asyncio.wait_for(session.send_ping(), timeout=15.0)
 
     async def call_tool(self, name: str, params: dict[str, Any]) -> Any:
         """Call a tool on the MCP server and convert the result."""
@@ -356,6 +369,7 @@ class MCPManager:
         self._servers: dict[str, MCPServerConfig] = {}
         self._connections: dict[str, MCPConnection] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._health_task: asyncio.Task | None = None
 
     def _get_lock(self, name: str) -> asyncio.Lock:
         """Get or create a per-server lock for serializing operations."""
@@ -403,8 +417,9 @@ class MCPManager:
         """Connect to a server, discover tools, and register approved tools."""
         async with self._get_lock(name):
             await self._connect_server_impl(name)
+        self.start_health_monitor(float(CONFIG.mcp_health_check_interval_seconds))
 
-    async def _connect_server_impl(self, name: str) -> None:
+    async def _connect_server_impl(self, name: str, *, auto: bool = False) -> None:
         config = self._servers.get(name)
         if config is None:
             raise ValueError(f"MCP server '{name}' not found")
@@ -416,7 +431,10 @@ class MCPManager:
         # build OAuth provider if needed
         oauth_provider = None
         if config.auth_type == "oauth" and config.url:
-            oauth_provider = self._create_oauth_provider(name, config.url)
+            callback_timeout = 5.0 if auto else 300.0
+            oauth_provider = self._create_oauth_provider(
+                name, config.url, callback_timeout=callback_timeout
+            )
 
         conn = MCPConnection(config, self._secret_manager, oauth_provider=oauth_provider)
         await conn.connect()
@@ -453,6 +471,84 @@ class MCPManager:
         if conn:
             await conn.disconnect()
 
+    def start_health_monitor(self, interval: float) -> None:
+        """Start the background health check loop. Safe to call if already running."""
+        if self._health_task is not None and not self._health_task.done():
+            return
+        if interval <= 0:
+            return
+        self._health_task = asyncio.create_task(self._health_check_loop(interval))
+
+    async def stop_health_monitor(self) -> None:
+        """Cancel the health check loop and await its completion."""
+        if self._health_task is not None:
+            self._health_task.cancel()
+            try:
+                await self._health_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.warning("Health monitor task raised on cancel", exc_info=True)
+        self._health_task = None
+
+    async def _health_check_loop(self, interval: float) -> None:
+        """Periodically ping each connected server and reconnect dead ones."""
+        while True:
+            await asyncio.sleep(interval)
+            # Top-level guard: a single iteration failure must not kill the loop.
+            try:
+                for name in list(self._connections.keys()):
+                    try:
+                        await asyncio.wait_for(
+                            self._health_check_server(name), timeout=20.0
+                        )
+                    except Exception as e:
+                        logger.warning("MCP health check failed for '%s': %s", name, e)
+                        await self._reconnect_server(name)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("Unexpected error in health check loop", exc_info=True)
+
+    async def _health_check_server(self, name: str) -> None:
+        """Ping a single server to verify the connection is alive.
+
+        Holds the per-server lock so the ping is serialized against
+        disconnect/reconnect from call_tool or disconnect_all.
+        """
+        async with self._get_lock(name):
+            conn = self._connections.get(name)
+            if conn is None or not conn.is_connected:
+                return
+            await conn.send_ping()
+
+    async def _reconnect_server(self, name: str) -> bool:
+        """Disconnect and reconnect a server under its lock.
+        Uses auto=True (short OAuth callback timeout). Returns True on success.
+
+        Both the disconnect and the connect are bounded by an outer timeout so a
+        hanging stack-close or hung OAuth round-trip can't stall the health monitor.
+        The 5s callback_timeout alone does NOT bound the entire flow, since the SDK
+        issues additional HTTP requests before/after the callback.
+        """
+        async with self._get_lock(name):
+            if name in self._connections:
+                await self._disconnect_server_impl(name)
+            try:
+                await asyncio.wait_for(
+                    self._connect_server_impl(name, auto=True),
+                    timeout=_RECONNECT_TIMEOUT,
+                )
+                return True
+            except asyncio.TimeoutError:
+                logger.warning("Auto-reconnect timed out for '%s'", name)
+                if name in self._connections:
+                    await self._disconnect_server_impl(name)
+                return False
+            except Exception as e:
+                logger.warning("Auto-reconnect failed for '%s': %s", name, e)
+                return False
+
     async def connect_all(self) -> None:
         """Connect to all enabled servers. Non-fatal on failure."""
         for name, config in list(self._servers.items()):
@@ -473,9 +569,11 @@ class MCPManager:
                 logger.warning(
                     "Failed to connect to MCP server '%s': %s", name, e
                 )
+        self.start_health_monitor(float(CONFIG.mcp_health_check_interval_seconds))
 
     async def disconnect_all(self) -> None:
         """Disconnect all connected servers."""
+        await self.stop_health_monitor()
         for name in list(self._connections.keys()):
             await self.disconnect_server(name)
 
@@ -632,7 +730,38 @@ class MCPManager:
             return await conn.call_tool(tool_name, params)
         except Exception as e:
             logger.warning("MCP tool call failed: %s.%s: %s", server_name, tool_name, e)
-            return {"error": f"MCP tool call failed: {e}"}
+            # Attempt one reconnection + retry under the per-server lock.
+            # The full connect (including OAuth round-trips) is bounded by a 20s
+            # timeout so the agent isn't blocked indefinitely on a hung server.
+            async with self._get_lock(server_name):
+                # Health monitor may have already reconnected — check first
+                conn = self._connections.get(server_name)
+                if conn is not None and conn.is_connected:
+                    try:
+                        return await conn.call_tool(tool_name, params)
+                    except Exception:
+                        pass  # still failing, proceed to full reconnect
+                # Full disconnect + reconnect (bounded)
+                if server_name in self._connections:
+                    await self._disconnect_server_impl(server_name)
+                try:
+                    await asyncio.wait_for(
+                        self._connect_server_impl(server_name, auto=True),
+                        timeout=_RECONNECT_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    if server_name in self._connections:
+                        await self._disconnect_server_impl(server_name)
+                    return {"error": f"MCP tool call failed: {e}. Auto-reconnect timed out."}
+                except Exception as reconnect_err:
+                    return {"error": f"MCP tool call failed: {e}. Reconnect failed: {reconnect_err}"}
+                conn = self._connections.get(server_name)
+                if conn is None or not conn.is_connected:
+                    return {"error": f"MCP tool call failed: {e}. Reconnect produced no active connection."}
+                try:
+                    return await conn.call_tool(tool_name, params)
+                except Exception as retry_err:
+                    return {"error": f"MCP tool call failed: {e}. Reconnected but retry also failed: {retry_err}"}
 
     # -- server CRUD --
 
@@ -822,7 +951,9 @@ class MCPManager:
 
     # -- internals --
 
-    def _create_oauth_provider(self, server_name: str, server_url: str) -> Any:
+    def _create_oauth_provider(
+        self, server_name: str, server_url: str, *, callback_timeout: float = 300.0
+    ) -> Any:
         """Create an OAuthClientProvider for a server.
 
         Uses a paste-back flow instead of a local callback server so it works
@@ -868,11 +999,13 @@ class MCPManager:
             logger.info("Waiting for OAuth callback paste for '%s'...", server_name)
 
             try:
-                # Wait up to 5 minutes for the operator to complete the flow
-                callback_url = await asyncio.wait_for(future, timeout=300.0)
+                # Wait up to callback_timeout for the operator to complete the flow
+                callback_url = await asyncio.wait_for(future, timeout=callback_timeout)
             except asyncio.TimeoutError:
                 self._oauth_state[server_name]["pending_callback"] = None
-                raise RuntimeError("OAuth callback timed out — no response within 5 minutes")
+                raise RuntimeError(
+                    f"OAuth callback timed out — no response within {callback_timeout}s"
+                )
 
             self._oauth_state[server_name]["pending_callback"] = None
 

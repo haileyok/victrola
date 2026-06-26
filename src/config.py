@@ -77,6 +77,13 @@ class Config(BaseSettings):
     embedding_dimensions: int = 768
     """dimensionality of the embedding model"""
 
+    # mcp
+    mcp_health_check_interval_seconds: int = 120
+    """seconds between background MCP connection health checks (0 disables)"""
+
+    mcp_sse_read_timeout_seconds: int = 1800
+    """SSE read timeout for streamable_http transports, in seconds"""
+
     # web ui
     web_host: str = "127.0.0.1"
     """host interface the web ui binds to. set to 0.0.0.0 to expose on the LAN."""
