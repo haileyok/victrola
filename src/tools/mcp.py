@@ -1161,6 +1161,7 @@ class MCPManager:
                 description=mcp_tool.description,
                 parameters=params,
                 handler=handler,
+                source="mcp",
             )
         )
 

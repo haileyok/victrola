@@ -319,8 +319,11 @@ async def _load_system_prompt(
         except Exception:
             logger.info("Failed to load skills, using defaults")
 
-    # tool documentation
-    tool_docs = TOOL_REGISTRY.generate_tool_documentation()
+    # tool documentation — built-in tools get full docs; MCP tools get a
+    # compact catalog (one line per tool). The agent fetches full MCP tool
+    # params on demand via system.get_tool_docs.
+    tool_docs = TOOL_REGISTRY.generate_builtin_tool_documentation()
+    mcp_catalog = TOOL_REGISTRY.generate_mcp_tool_catalog()
 
     # collect available secret names for the system prompt
     secret_names: list[str] = []
@@ -337,15 +340,6 @@ async def _load_system_prompt(
                 lines.append(f"- **{t.name}**: {t.description}")
             custom_tools_list = "\n".join(lines)
 
-    # build MCP servers list for the system prompt
-    mcp_servers_list = ""
-    if executor.mcp_manager is not None:
-        servers = executor.mcp_manager.list_servers()
-        if servers:
-            mcp_servers_list = "\n".join(
-                f"- **{s.name}**: {s.transport}" for s in servers
-            )
-
     return build_system_prompt(
         self_doc=self_doc,
         operator_doc=operator_doc,
@@ -353,7 +347,7 @@ async def _load_system_prompt(
         tool_docs=tool_docs,
         secret_names=secret_names,
         custom_tools_list=custom_tools_list,
-        mcp_servers_list=mcp_servers_list,
+        mcp_tool_catalog=mcp_catalog,
     )
 
 
