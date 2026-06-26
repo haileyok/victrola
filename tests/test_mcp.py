@@ -204,15 +204,14 @@ async def test_execute_does_not_unwrap_when_tool_has_no_params():
 
 @pytest.mark.asyncio
 async def test_execute_does_not_unwrap_object_param_with_overlapping_keys():
-    """When the first param is an object type and its value contains a key
-    that matches a sibling param name, the unwrap should NOT fire — the
-    object is a legitimate parameter value, not an argument envelope.
+    """When the first param is an object type, the unwrap should never fire —
+    the object is a legitimate parameter value, not an argument envelope.
 
     Example: tool has params (filter: object, limit: number). The agent
     calls with filter={"status": "open", "limit": 5}. The wire message is
-    {"filter": {"status": "open", "limit": 5}}. Without the outer_key check,
-    "limit" in the nested dict would trigger unwrap and silently discard the
-    filter object, leaving only {"limit": 5}.
+    {"filter": {"status": "open", "limit": 5}}. Even though "limit" matches
+    a sibling param AND "filter" (the outer key) appears inside the dict,
+    the first param is object-typed so we don't unwrap.
     """
     reg = ToolRegistry()
     received = {}
@@ -233,13 +232,50 @@ async def test_execute_does_not_unwrap_object_param_with_overlapping_keys():
         )
     )
 
-    # "filter" is NOT a key inside the nested dict, so this is a legitimate
-    # object value — don't unwrap
+    # Even with "filter" inside the nested dict AND "limit" matching a sibling,
+    # this is an object-typed first param — don't unwrap
     await reg.execute(
-        None, "test.tool", {"filter": {"status": "open", "limit": 5}}
+        None, "test.tool", {"filter": {"status": "open", "limit": 5, "filter": True}}
     )
 
-    assert received == {"filter": {"status": "open", "limit": 5}}
+    assert received == {"filter": {"status": "open", "limit": 5, "filter": True}}
+
+
+@pytest.mark.asyncio
+async def test_execute_does_not_unwrap_object_param_self_referential():
+    """Even when the object value contains its own param name as a key plus
+    a sibling param name, don't unwrap — it's still a legitimate object value.
+
+    This is the edge case where the outer_key check alone is insufficient:
+    params (filter: object, limit: number), value contains both "filter"
+    and "limit" as keys. The object-type guard prevents the unwrap.
+    """
+    reg = ToolRegistry()
+    received = {}
+
+    async def handler(ctx, **kw):
+        received.update(kw)
+        return "ok"
+
+    reg.register(
+        Tool(
+            name="test.tool",
+            description="test",
+            parameters=[
+                ToolParameter(name="filter", type="object", description="filter", required=True),
+                ToolParameter(name="limit", type="number", description="limit", required=False),
+            ],
+            handler=handler,
+        )
+    )
+
+    await reg.execute(
+        None,
+        "test.tool",
+        {"filter": {"filter": {"nested": True}, "limit": 5, "status": "open"}},
+    )
+
+    assert received == {"filter": {"filter": {"nested": True}, "limit": 5, "status": "open"}}
 
 
 # ---------------------------------------------------------------------------
