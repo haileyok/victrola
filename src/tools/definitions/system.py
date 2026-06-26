@@ -31,6 +31,9 @@ async def get_tool_docs(ctx: ToolContext, names: list[str]) -> dict[str, Any]:
             result[name] = {"error": f"Tool '{name}' not found"}
             continue
 
+        # Sanitize descriptions — MCP tool descriptions are untrusted input
+        # from external servers and must not inject headings/code fences into
+        # the agent's context.
         params = []
         for p in tool.parameters:
             params.append(
@@ -38,12 +41,12 @@ async def get_tool_docs(ctx: ToolContext, names: list[str]) -> dict[str, Any]:
                     "name": p.name,
                     "type": p.type,
                     "required": p.required,
-                    "description": p.description,
+                    "description": TOOL_REGISTRY._sanitize_md(p.description),
                 }
             )
 
         result[name] = {
-            "description": tool.description,
+            "description": TOOL_REGISTRY._sanitize_md(tool.description),
             "parameters": params,
         }
 
