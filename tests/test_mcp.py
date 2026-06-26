@@ -1096,6 +1096,8 @@ async def test_web_oauth_deauthorize(tmp_path):
 # ---------------------------------------------------------------------------
 # Resilience tests: health monitor, auto-reconnect, sse_read_timeout
 # ---------------------------------------------------------------------------
+# Tiered tool documentation tests
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -1671,4 +1673,78 @@ async def test_disconnect_all_awaits_health_monitor_during_teardown(tmp_path):
     assert manager._health_task is None
     # Connections should be empty
     assert len(manager._connections) == 0
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_registration_sets_source_to_mcp(tmp_path):
+    """_register_tool creates tools with source='mcp'."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(name="srv", transport="sse", url="https://example.com")
+    config.tools = [
+        MCPTool(name="search", description="Search stuff", input_schema={})
+    ]
+    await manager.create_server(config)
+    await manager.approve_tool("srv", "search")
+
+    tool = manager._registry.get("srv.search")
+    assert tool is not None
+    assert tool.source == "mcp"
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_approve_appears_in_catalog_revoke_disappears(tmp_path):
+    """Full lifecycle: approve → tool appears in MCP catalog, revoke → disappears."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(name="srv", transport="sse", url="https://example.com")
+    config.tools = [
+        MCPTool(name="search", description="Search stuff", input_schema={})
+    ]
+    await manager.create_server(config)
+
+    # Before approval: catalog should be empty
+    assert manager._registry.generate_mcp_tool_catalog() == ""
+
+    # Approve
+    await manager.approve_tool("srv", "search")
+    catalog = manager._registry.generate_mcp_tool_catalog()
+    assert "srv.search" in catalog
+    assert "## srv" in catalog
+    assert "Search stuff" in catalog
+
+    # Revoke
+    await manager.revoke_tool("srv", "search")
+    assert manager._registry.generate_mcp_tool_catalog() == ""
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_system_namespace_is_reserved(tmp_path):
+    """MCP server named 'system' should be rejected — it would shadow the
+    built-in system.get_tool_docs discovery tool."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(name="system", transport="sse", url="https://example.com")
+    result = await manager.create_server(config)
+    assert "reserved namespace" in result
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_load_servers_skips_reserved_namespace(tmp_path):
+    """Persisted MCP server configs with now-reserved names should be skipped
+    on load so they can't shadow built-in tools."""
+    manager, store = await _make_manager(tmp_path)
+
+    # Manually persist a server config with a reserved namespace name
+    import json
+    config = MCPServerConfig(name="system", transport="sse", url="https://example.com")
+    await store.documents.create(
+        "mcpserver:system",
+        json.dumps(config.to_dict()),
+    )
+
+    # Reload — should skip the reserved name
+    await manager.load_servers()
+    assert "system" not in manager._servers
     await store.close()

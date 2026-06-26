@@ -29,6 +29,7 @@ Deno runs with the bare minimum of permissions: no filesystem writes, no network
 | `web` | search tools via [Exa](https://exa.ai) (requires `EXA_API_KEY`). |
 | `image` | `view_image` | Fetch an image URL and include it inline. |
 | `custom_tools` | `create_custom_tool`, `call_tool`, etc. | Agent-written tools (see below). |
+| `system` | `get_tool_docs` | Fetch full parameter docs for any tool (typically MCP tools, which are listed in a compact catalog in the system prompt). |
 
 ## Writing your own tools
 

@@ -204,15 +204,24 @@ You can call multiple custom tools in a single `execute_code` block — just `aw
 """
 
 
-MCP_TOOLS_TEMPLATE = """
+MCP_TOOL_CATALOG_TEMPLATE = """
 # MCP Tools
 
-MCP (Model Context Protocol) tools are external tools provided by MCP servers. They appear in the `tools` namespace under their server name (e.g. `tools.fastmail.search_mail(...)`). Each tool was discovered from its server and individually approved by the operator.
+MCP (Model Context Protocol) tools are external tools provided by MCP servers. They appear in the `tools` namespace under their server name (e.g. `tools.github.create_issue(...)`). Each tool was discovered from its server and individually approved by the operator.
+
+Only a compact catalog is shown below — **call `tools.system.get_tool_docs({{ names: ["server.tool"] }})` from inside `execute_code` to get full parameter details before using an MCP tool.** You only need to do this once per tool per conversation; the results stay in your context.
+
+Example:
+```typescript
+const docs = await tools.system.get_tool_docs({{ names: ["github.create_issue"] }});
+output({{ docs }});
+```
 
 If an MCP tool returns a connection error, the server may be temporarily unavailable — inform the operator.
 
-Configured MCP servers:
-{mcp_servers_list}
+## MCP Tool Catalog
+
+{mcp_tool_catalog}
 """
 
 
@@ -223,7 +232,7 @@ def build_system_prompt(
     tool_docs: str = "",
     secret_names: list[str] | None = None,
     custom_tools_list: str = "",
-    mcp_servers_list: str = "",
+    mcp_tool_catalog: str = "",
 ) -> str:
     """
     builds the system prompt from static instructions and per-agent content.
@@ -257,7 +266,7 @@ def build_system_prompt(
         parts.append(CUSTOM_TOOLS_LIST_TEMPLATE.format(custom_tools_list=custom_tools_list))
 
     # MCP tools section
-    if mcp_servers_list:
-        parts.append(MCP_TOOLS_TEMPLATE.format(mcp_servers_list=mcp_servers_list))
+    if mcp_tool_catalog:
+        parts.append(MCP_TOOL_CATALOG_TEMPLATE.format(mcp_tool_catalog=mcp_tool_catalog))
 
     return "\n".join(parts)

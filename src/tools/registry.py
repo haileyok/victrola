@@ -22,6 +22,7 @@ class Tool(BaseModel):
     description: str
     parameters: list[ToolParameter]
     handler: Callable[..., Awaitable[Any]]  # async function
+    source: Literal["builtin", "mcp"] = "builtin"
 
 
 class ToolContext:
@@ -186,6 +187,93 @@ class ToolRegistry:
 
         return "\n".join(lines)
 
+    def generate_builtin_tool_documentation(self) -> str:
+        """Generate full markdown docs for built-in tools only.
+
+        Same format as generate_tool_documentation() but filtered to
+        source == "builtin". MCP tools are excluded — they get a compact
+        catalog via generate_mcp_tool_catalog().
+        """
+        by_namespace: dict[str, list[Tool]] = {}
+        for tool in self._tools.values():
+            if tool.source != "builtin":
+                continue
+            namespace = tool.name.split(".")[0]
+            by_namespace.setdefault(namespace, []).append(tool)
+
+        lines: list[str] = []
+        for namespace, tools in sorted(by_namespace.items()):
+            lines.append(f"## {namespace}\n")
+            for tool in sorted(tools, key=lambda t: t.name):
+                lines.append(f"### {tool.name}")
+                lines.append(f"{self._sanitize_md(tool.description)}\n")
+                if tool.parameters:
+                    lines.append("**Parameters:**")
+                    for param in tool.parameters:
+                        req = "" if param.required else " (optional)"
+                        default = (
+                            f", default: {param.default}"
+                            if param.default is not None
+                            else ""
+                        )
+                        lines.append(
+                            f"- `{param.name}` ({param.type}{req}{default}): {self._sanitize_md(param.description)}"
+                        )
+                    lines.append("")
+
+        return "\n".join(lines)
+
+    def generate_mcp_tool_catalog(self) -> str:
+        """Generate a compact one-line-per-tool catalog for MCP tools.
+
+        Format: `server.method — short description` grouped by server.
+        Descriptions are sanitized and truncated to the first line (~100 chars).
+        Returns an empty string when no MCP tools are registered.
+        """
+        mcp_tools = [t for t in self._tools.values() if t.source == "mcp"]
+        if not mcp_tools:
+            return ""
+
+        by_server: dict[str, list[Tool]] = {}
+        for tool in mcp_tools:
+            server = tool.name.split(".")[0]
+            by_server.setdefault(server, []).append(tool)
+
+        lines: list[str] = []
+        for server, tools in sorted(by_server.items()):
+            lines.append(f"## {server}")
+            for tool in sorted(tools, key=lambda t: t.name):
+                desc = tool.description
+                if not desc:
+                    short = "(no description provided)"
+                else:
+                    sanitized = self._sanitize_md(desc)
+                    short = self._truncate_description(sanitized)
+                    if not short:
+                        short = "(no description provided)"
+                lines.append(f"- `{tool.name}` — {short}")
+            lines.append("")
+
+        return "\n".join(lines).rstrip()
+
+    @staticmethod
+    def _truncate_description(text: str, max_chars: int = 100) -> str:
+        """Truncate to the first line, then to max_chars with an ellipsis.
+
+        Also strips leading markdown list markers (-, *, +) and blockquote
+        prefixes (>) so they don't render as a double dash in the catalog
+        bullet list.
+        """
+        first_line = text.split("\n", 1)[0].strip()
+        # strip leading markdown list markers / blockquote prefixes
+        for prefix in ("- ", "* ", "+ ", "> "):
+            if first_line.startswith(prefix):
+                first_line = first_line[len(prefix):].lstrip()
+                break
+        if len(first_line) <= max_chars:
+            return first_line
+        return first_line[:max_chars].rstrip() + "…"
+
     def generate_typescript_types(self) -> str:
         lines = [
             "// Auto-generated - do not edit",
@@ -269,8 +357,19 @@ class ToolRegistry:
         lines = text.split("\n")
         sanitized_lines = []
         for line in lines:
-            # strip leading # markers that could inject fake headings
-            stripped = line.lstrip("#")
+            # strip leading whitespace then remove markdown heading
+            # syntax (1-6 # followed by space or end-of-line). This
+            # avoids stripping # from legitimate text like "#hashtag".
+            stripped = line.lstrip()
+            # count leading # characters
+            hash_count = 0
+            while hash_count < len(stripped) and stripped[hash_count] == "#":
+                hash_count += 1
+            if hash_count > 0 and hash_count <= 6:
+                rest = stripped[hash_count:]
+                # it's a heading only if # is followed by space or EOL
+                if not rest or rest[0] in (" ", "\t"):
+                    stripped = rest.lstrip()
             sanitized_lines.append(stripped)
         result = "\n".join(sanitized_lines)
         # neutralize backtick-fenced code blocks

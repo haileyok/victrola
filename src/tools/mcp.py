@@ -38,6 +38,7 @@ _RESERVED_NAMESPACES = {
     "summarize",
     "image",
     "custom_tools",
+    "system",
 }
 
 # TypeScript/JavaScript reserved words that must not be used as identifiers
@@ -433,6 +434,16 @@ class MCPManager:
                 try:
                     data = json.loads(content)
                     config = MCPServerConfig.from_dict(data)
+                    # Skip configs whose name is now a reserved namespace
+                    # (e.g. a legacy "system" server created before the
+                    # namespace was reserved by a built-in tool).
+                    if config.name in _RESERVED_NAMESPACES:
+                        logger.warning(
+                            "Skipping persisted MCP server '%s' — name is now "
+                            "a reserved namespace. Delete it via the web UI.",
+                            config.name,
+                        )
+                        continue
                     self._servers[config.name] = config
                 except Exception as e:
                     logger.warning("Failed to parse MCP server config %s: %s", rkey, e)
@@ -1161,6 +1172,7 @@ class MCPManager:
                 description=mcp_tool.description,
                 parameters=params,
                 handler=handler,
+                source="mcp",
             )
         )
 
