@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import AnyUrl
 
+from src.config import CONFIG
 from src.tools.registry import Tool, ToolParameter
 
 if TYPE_CHECKING:
@@ -60,6 +61,27 @@ _CONNECT_TIMEOUT = 30.0
 
 # Bounded timeout for individual tool calls and list_tools
 _CALL_TIMEOUT = 60.0
+
+# Bounded timeout for auto-reconnection (disconnect + reconnect).
+# Bounds the full OAuth flow (client registration, token exchange, callback).
+_RECONNECT_TIMEOUT = 20.0
+
+# Best-effort timeout for closing an old transport during reconnect.
+# If cleanup doesn't finish in this time, the background task is abandoned.
+_DETACHED_DISCONNECT_TIMEOUT = 10.0
+
+
+async def _detached_disconnect(conn: "MCPConnection") -> None:
+    """Close a connection in the background with a best-effort timeout.
+
+    Prevents a hung transport close (cancellation-resistant aclose) from
+    blocking the caller. If the close doesn't finish in time, the task
+    is abandoned — the stale connection leaks but the caller proceeds.
+    """
+    try:
+        await asyncio.wait_for(conn.disconnect(), timeout=_DETACHED_DISCONNECT_TIMEOUT)
+    except Exception:
+        logger.warning("Detached disconnect failed (abandoned)", exc_info=True)
 
 
 @dataclass
@@ -197,6 +219,7 @@ class MCPConnection:
                         headers=headers or None,
                         auth=auth,
                         timeout=30.0,
+                        sse_read_timeout=float(CONFIG.mcp_sse_read_timeout_seconds),
                     )
                 )
                 # streamablehttp_client returns (read, write, get_session_id)
@@ -234,7 +257,22 @@ class MCPConnection:
         except BaseException:
             # Clean up the exit stack if any step failed — otherwise
             # transports/subprocesses entered into the stack would leak.
-            await self.disconnect()
+            # Bound the cleanup so a hung transport close can't block the
+            # caller indefinitely (e.g. during wait_for cancellation in
+            # auto-reconnect). If the transport's aclose() is truly
+            # cancellation-resistant, the wait_for itself may delay — this
+            # is an asyncio limitation. The session/stack are nulled
+            # regardless so the connection is marked dead.
+            try:
+                await asyncio.wait_for(
+                    self.disconnect(), timeout=_DETACHED_DISCONNECT_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                logger.warning("disconnect() timed out during connect cleanup — abandoning transport")
+                self._session = None
+                self._stack = None
+            except Exception:
+                logger.warning("Error during connect cleanup disconnect", exc_info=True)
             raise
 
     async def disconnect(self) -> None:
@@ -255,6 +293,13 @@ class MCPConnection:
             self._session.list_tools(), timeout=_CALL_TIMEOUT
         )
         return result.tools
+
+    async def send_ping(self) -> None:
+        """Send a health-check ping. Raises if the connection is dead."""
+        session = self._session
+        if session is None:
+            raise RuntimeError("Not connected")
+        await asyncio.wait_for(session.send_ping(), timeout=15.0)
 
     async def call_tool(self, name: str, params: dict[str, Any]) -> Any:
         """Call a tool on the MCP server and convert the result."""
@@ -356,6 +401,7 @@ class MCPManager:
         self._servers: dict[str, MCPServerConfig] = {}
         self._connections: dict[str, MCPConnection] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._health_task: asyncio.Task | None = None
 
     def _get_lock(self, name: str) -> asyncio.Lock:
         """Get or create a per-server lock for serializing operations."""
@@ -403,8 +449,9 @@ class MCPManager:
         """Connect to a server, discover tools, and register approved tools."""
         async with self._get_lock(name):
             await self._connect_server_impl(name)
+        self.start_health_monitor(float(CONFIG.mcp_health_check_interval_seconds))
 
-    async def _connect_server_impl(self, name: str) -> None:
+    async def _connect_server_impl(self, name: str, *, auto: bool = False) -> None:
         config = self._servers.get(name)
         if config is None:
             raise ValueError(f"MCP server '{name}' not found")
@@ -416,7 +463,10 @@ class MCPManager:
         # build OAuth provider if needed
         oauth_provider = None
         if config.auth_type == "oauth" and config.url:
-            oauth_provider = self._create_oauth_provider(name, config.url)
+            callback_timeout = 5.0 if auto else 300.0
+            oauth_provider = self._create_oauth_provider(
+                name, config.url, callback_timeout=callback_timeout
+            )
 
         conn = MCPConnection(config, self._secret_manager, oauth_provider=oauth_provider)
         await conn.connect()
@@ -433,8 +483,29 @@ class MCPManager:
         except BaseException:
             # Clean up the connection if discovery or registration failed
             # so we don't leave a live session with no tools registered.
-            await self._disconnect_server_impl(name)
+            # Use detached cleanup so a hung transport close can't block
+            # the caller (same pattern as auto-reconnect).
+            self._cleanup_connection(name)
             raise
+
+    def _cleanup_connection(self, name: str) -> None:
+        """Unregister tools, pop connection, and schedule background cleanup.
+
+        Synchronous tool unregistration + non-blocking transport close.
+        Caller must hold the per-server lock (or be in a context where no
+        other task can touch this server).
+        """
+        config = self._servers.get(name)
+        if config:
+            for tool in config.tools:
+                if tool.approved:
+                    self._registry.unregister(
+                        f"{name}.{self._sanitize_tool_name(tool.name)}"
+                    )
+        conn = self._connections.pop(name, None)
+        if conn:
+            conn._session = None
+            asyncio.create_task(_detached_disconnect(conn))
 
     async def disconnect_server(self, name: str) -> None:
         """Disconnect a server and unregister its tools."""
@@ -452,6 +523,117 @@ class MCPManager:
         conn = self._connections.pop(name, None)
         if conn:
             await conn.disconnect()
+
+    def start_health_monitor(self, interval: float) -> None:
+        """Start the background health check loop. Safe to call if already running."""
+        if self._health_task is not None and not self._health_task.done():
+            return
+        if interval <= 0:
+            return
+        self._health_task = asyncio.create_task(self._health_check_loop(interval))
+
+    async def stop_health_monitor(self) -> None:
+        """Cancel the health check loop and await its completion."""
+        if self._health_task is not None:
+            self._health_task.cancel()
+            try:
+                await self._health_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.warning("Health monitor task raised on cancel", exc_info=True)
+        self._health_task = None
+
+    async def _health_check_loop(self, interval: float) -> None:
+        """Periodically ping each connected server and reconnect dead ones."""
+        while True:
+            await asyncio.sleep(interval)
+            # Top-level guard: a single iteration failure must not kill the loop.
+            try:
+                for name in list(self._connections.keys()):
+                    try:
+                        await asyncio.wait_for(
+                            self._health_check_server(name), timeout=20.0
+                        )
+                    except Exception as e:
+                        logger.warning("MCP health check failed for '%s': %s", name, e)
+                        await self._reconnect_server(name)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("Unexpected error in health check loop", exc_info=True)
+
+    async def _health_check_server(self, name: str) -> None:
+        """Ping a single server to verify the connection is alive.
+
+        Uses a short try-acquire on the per-server lock so a long-running
+        tool call doesn't block the health check — it just skips this iteration.
+        """
+        lock = self._get_lock(name)
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=1.0)
+        except asyncio.TimeoutError:
+            logger.debug("Skipping health check for '%s' — lock held by active call", name)
+            return
+        try:
+            conn = self._connections.get(name)
+            if conn is None or not conn.is_connected:
+                return
+            await conn.send_ping()
+        finally:
+            lock.release()
+
+    async def _reconnect_server(self, name: str) -> bool:
+        """Disconnect and reconnect a server under its lock.
+        Uses auto=True (short OAuth callback timeout). Returns True on success.
+
+        The entire disconnect+connect sequence is bounded by _RECONNECT_TIMEOUT.
+        On timeout, the connection is popped from _connections without awaiting
+        cleanup — the cancelled task's cleanup runs independently and the stale
+        connection is left for GC.
+        """
+        async with self._get_lock(name):
+            # Guard: a manual disconnect or delete may have already removed
+            # the connection between the health check failure and here.
+            if name not in self._connections:
+                return False
+            config = self._servers.get(name)
+            if config is None or not config.enabled:
+                return False
+            try:
+                await asyncio.wait_for(
+                    self._reconnect_server_impl(name),
+                    timeout=_RECONNECT_TIMEOUT,
+                )
+                return True
+            except asyncio.TimeoutError:
+                logger.warning("Auto-reconnect timed out for '%s'", name)
+                # Pop and schedule background cleanup. The wait_for cancellation
+                # may still be in progress; don't await disconnect synchronously.
+                conn = self._connections.pop(name, None)
+                if conn:
+                    conn._session = None
+                    asyncio.create_task(_detached_disconnect(conn))
+                return False
+            except Exception as e:
+                logger.warning("Auto-reconnect failed for '%s': %s", name, e)
+                if name in self._connections:
+                    await self._disconnect_server_impl(name)
+                return False
+
+    async def _reconnect_server_impl(self, name: str) -> None:
+        """Disconnect and reconnect. Caller must hold the per-server lock.
+
+        The old connection is popped immediately and its cleanup is scheduled
+        as a background task with a best-effort timeout. This prevents a hung
+        transport close from blocking the reconnect while still attempting
+        proper resource cleanup.
+        """
+        conn = self._connections.pop(name, None)
+        if conn:
+            conn._session = None
+            asyncio.create_task(_detached_disconnect(conn))
+        await self._connect_server_impl(name, auto=True)
 
     async def connect_all(self) -> None:
         """Connect to all enabled servers. Non-fatal on failure."""
@@ -473,9 +655,11 @@ class MCPManager:
                 logger.warning(
                     "Failed to connect to MCP server '%s': %s", name, e
                 )
+        self.start_health_monitor(float(CONFIG.mcp_health_check_interval_seconds))
 
     async def disconnect_all(self) -> None:
         """Disconnect all connected servers."""
+        await self.stop_health_monitor()
         for name in list(self._connections.keys()):
             await self.disconnect_server(name)
 
@@ -621,18 +805,51 @@ class MCPManager:
     async def call_tool(
         self, server_name: str, tool_name: str, params: dict[str, Any]
     ) -> Any:
-        """Proxy a tool call to the MCP server."""
-        conn = self._connections.get(server_name)
-        if conn is None or not conn.is_connected:
-            return {
-                "error": f"MCP server '{server_name}' is not connected. "
-                "The operator can reconnect it via the web UI."
-            }
-        try:
-            return await conn.call_tool(tool_name, params)
-        except Exception as e:
-            logger.warning("MCP tool call failed: %s.%s: %s", server_name, tool_name, e)
-            return {"error": f"MCP tool call failed: {e}"}
+        """Proxy a tool call to the MCP server.
+
+        Holds the per-server lock for the entire call so the health monitor
+        can't tear down the session mid-call. If the call fails, attempts one
+        bounded reconnection and retries.
+        """
+        async with self._get_lock(server_name):
+            conn = self._connections.get(server_name)
+            if conn is None or not conn.is_connected:
+                return {
+                    "error": f"MCP server '{server_name}' is not connected. "
+                    "The operator can reconnect it via the web UI."
+                }
+            try:
+                return await conn.call_tool(tool_name, params)
+            except Exception as e:
+                logger.warning("MCP tool call failed: %s.%s: %s", server_name, tool_name, e)
+                # Attempt one bounded reconnection + retry. The full disconnect
+                # + connect (including OAuth round-trips) is bounded by
+                # _RECONNECT_TIMEOUT so the agent isn't blocked indefinitely.
+                try:
+                    await asyncio.wait_for(
+                        self._reconnect_server_impl(server_name),
+                        timeout=_RECONNECT_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    # Pop and schedule background cleanup. The wait_for
+                    # cancellation may still be in progress; don't await
+                    # disconnect synchronously.
+                    conn = self._connections.pop(server_name, None)
+                    if conn:
+                        conn._session = None
+                        asyncio.create_task(_detached_disconnect(conn))
+                    return {"error": f"MCP tool call failed: {e}. Auto-reconnect timed out."}
+                except Exception as reconnect_err:
+                    if server_name in self._connections:
+                        await self._disconnect_server_impl(server_name)
+                    return {"error": f"MCP tool call failed: {e}. Reconnect failed: {reconnect_err}"}
+                conn = self._connections.get(server_name)
+                if conn is None or not conn.is_connected:
+                    return {"error": f"MCP tool call failed: {e}. Reconnect produced no active connection."}
+                try:
+                    return await conn.call_tool(tool_name, params)
+                except Exception as retry_err:
+                    return {"error": f"MCP tool call failed: {e}. Reconnected but retry also failed: {retry_err}"}
 
     # -- server CRUD --
 
@@ -822,7 +1039,9 @@ class MCPManager:
 
     # -- internals --
 
-    def _create_oauth_provider(self, server_name: str, server_url: str) -> Any:
+    def _create_oauth_provider(
+        self, server_name: str, server_url: str, *, callback_timeout: float = 300.0
+    ) -> Any:
         """Create an OAuthClientProvider for a server.
 
         Uses a paste-back flow instead of a local callback server so it works
@@ -868,11 +1087,13 @@ class MCPManager:
             logger.info("Waiting for OAuth callback paste for '%s'...", server_name)
 
             try:
-                # Wait up to 5 minutes for the operator to complete the flow
-                callback_url = await asyncio.wait_for(future, timeout=300.0)
+                # Wait up to callback_timeout for the operator to complete the flow
+                callback_url = await asyncio.wait_for(future, timeout=callback_timeout)
             except asyncio.TimeoutError:
                 self._oauth_state[server_name]["pending_callback"] = None
-                raise RuntimeError("OAuth callback timed out — no response within 5 minutes")
+                raise RuntimeError(
+                    f"OAuth callback timed out — no response within {callback_timeout}s"
+                )
 
             self._oauth_state[server_name]["pending_callback"] = None
 
