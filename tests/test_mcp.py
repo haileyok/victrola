@@ -278,6 +278,49 @@ async def test_execute_does_not_unwrap_object_param_self_referential():
     assert received == {"filter": {"filter": {"nested": True}, "limit": 5, "status": "open"}}
 
 
+@pytest.mark.asyncio
+async def test_execute_unwraps_single_object_without_first_param_name():
+    """When the agent passes a single object that doesn't contain the first
+    param's name, the unwrap should still fire as long as at least one key
+    matches a declared param.
+
+    This is the fastmail search_email regression: the schema has params
+    (limit, query, position) — all scalar, all optional. The agent calls
+    search_email({ query: "is:unread" }), which lands in the first positional
+    slot ("position"). The object contains "query" but not "position", so the
+    old outer_key check blocked the unwrap and the MCP server received
+    {'position': {'query': 'is:unread'}} — a dict where an integer was
+    expected — and returned empty results.
+    """
+    reg = ToolRegistry()
+    received = {}
+
+    async def handler(ctx, **kw):
+        received.update(kw)
+        return "ok"
+
+    reg.register(
+        Tool(
+            name="fastmail.search_email",
+            description="search email",
+            parameters=[
+                ToolParameter(name="limit", type="number", description="limit", required=False),
+                ToolParameter(name="query", type="string", description="query", required=False),
+                ToolParameter(name="position", type="number", description="position", required=False),
+            ],
+            handler=handler,
+        )
+    )
+
+    # The agent's { query: "is:unread" } lands in the "position" slot.
+    # "query" matches a declared param, so unwrap even though "position"
+    # does not appear inside the nested object.
+    await reg.execute(None, "fastmail.search_email", {"position": {"query": "is:unread"}})
+
+    assert received == {"query": "is:unread"}
+    assert "position" not in received
+
+
 # ---------------------------------------------------------------------------
 # Dataclass serialization tests
 # ---------------------------------------------------------------------------
