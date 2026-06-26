@@ -81,7 +81,7 @@ async def _detached_disconnect(conn: "MCPConnection") -> None:
     """
     try:
         await asyncio.wait_for(conn.disconnect(), timeout=_DETACHED_DISCONNECT_TIMEOUT)
-    except Exception:
+    except (Exception, asyncio.CancelledError):
         logger.warning("Detached disconnect failed (abandoned)", exc_info=True)
 
 
@@ -282,7 +282,7 @@ class MCPConnection:
         if self._stack is not None:
             try:
                 await self._stack.aclose()
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 logger.warning("Error closing MCP connection", exc_info=True)
             self._stack = None
 
@@ -951,16 +951,12 @@ class MCPManager:
             if config is None:
                 return f"MCP server '{name}' not found."
 
-            # disconnect (also unregisters tools)
-            if name in self._connections:
-                await self._disconnect_server_impl(name)
-            else:
-                # even if not connected, unregister any approved tools
-                for tool in config.tools:
-                    if tool.approved:
-                        self._registry.unregister(
-                            f"{name}.{self._sanitize_tool_name(tool.name)}"
-                        )
+            # Unregister tools and close the transport in the background.
+            # Using _cleanup_connection (non-blocking, detached close with a
+            # timeout) instead of _disconnect_server_impl so a hung or
+            # cancellation-resistant transport teardown doesn't fail the
+            # delete request.
+            self._cleanup_connection(name)
 
             rkey = f"{MCP_RKEY_PREFIX}{name}"
             if self._store.documents is None:
