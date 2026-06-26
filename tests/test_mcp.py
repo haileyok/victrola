@@ -1211,8 +1211,8 @@ async def test_call_tool_auto_reconnects_on_failure(tmp_path):
         result = await manager.call_tool("srv", "search", {"q": "test"})
 
     assert result == "result"
-    # fail_conn.call_tool called twice: initial failure + check-first retry
-    assert fail_conn.call_tool.await_count == 2
+    # fail_conn.call_tool called once (the initial failure)
+    fail_conn.call_tool.assert_awaited_once()
     # good_conn.call_tool should have been called once (the retry after reconnect)
     good_conn.call_tool.assert_awaited_once()
 
@@ -1408,53 +1408,53 @@ async def test_sse_read_timeout_passed_to_transport(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_call_tool_succeeds_after_health_monitor_reconnected(tmp_path):
-    """call_tool uses the 'check first' path when the health monitor already reconnected."""
+async def test_call_tool_serializes_with_health_monitor(tmp_path):
+    """call_tool holds the per-server lock; health check skips while a call is in progress."""
+    import asyncio
     from unittest.mock import AsyncMock, MagicMock
 
     manager, store = await _make_manager(tmp_path)
     config = MCPServerConfig(name="srv", transport="sse", url="https://example.com")
     await manager.create_server(config)
 
-    # Initial connection — call_tool will fail
-    fail_conn = MagicMock()
-    fail_conn.is_connected = True
-    fail_conn.connect = AsyncMock()
-    fail_conn.disconnect = AsyncMock()
-    fail_conn.list_tools = AsyncMock(return_value=[])
-    fail_conn.call_tool = AsyncMock(side_effect=RuntimeError("transport dead"))
+    call_started = asyncio.Event()
+    call_can_finish = asyncio.Event()
 
-    # After the initial failure, we simulate the health monitor having already
-    # reconnected by replacing the connection in _connections with a healthy one
-    # before call_tool acquires the lock. We do this by having the initial
-    # call_tool's side_effect swap the connection.
-    healthy_conn = MagicMock()
-    healthy_conn.is_connected = True
-    healthy_conn.connect = AsyncMock()
-    healthy_conn.disconnect = AsyncMock()
-    healthy_conn.list_tools = AsyncMock(return_value=[])
-    healthy_conn.call_tool = AsyncMock(return_value="recovered_result")
+    mock_conn = MagicMock()
+    mock_conn.is_connected = True
+    mock_conn.connect = AsyncMock()
+    mock_conn.disconnect = AsyncMock()
+    mock_conn.list_tools = AsyncMock(return_value=[])
 
-    def fail_then_swap(*args, **kwargs):
-        # Swap the connection so the check-first path finds a healthy one
-        manager._connections["srv"] = healthy_conn
-        raise RuntimeError("transport dead")
+    async def slow_call_tool(*args, **kwargs):
+        call_started.set()
+        await call_can_finish.wait()
+        return "slow_result"
 
-    fail_conn.call_tool = AsyncMock(side_effect=fail_then_swap)
+    mock_conn.call_tool = AsyncMock(side_effect=slow_call_tool)
+    mock_conn.send_ping = AsyncMock()
 
-    disconnect_spy = AsyncMock(wraps=manager._disconnect_server_impl)
-
-    with patch("src.tools.mcp.MCPConnection", return_value=fail_conn):
+    with patch("src.tools.mcp.MCPConnection", return_value=mock_conn):
         await manager.connect_server("srv")
-        with patch.object(manager, "_disconnect_server_impl", disconnect_spy):
-            result = await manager.call_tool("srv", "search", {"q": "test"})
 
-    # Should have succeeded via the check-first path
-    assert result == "recovered_result"
-    # _disconnect_server_impl should NOT have been called (no full reconnect)
-    disconnect_spy.assert_not_awaited()
-    # healthy_conn.call_tool should have been called (the retry)
-    healthy_conn.call_tool.assert_awaited_once()
+        # Run call_tool and _health_check_server concurrently
+        async def do_call():
+            return await manager.call_tool("srv", "search", {"q": "test"})
+
+        async def do_health_check():
+            await call_started.wait()
+            # Health check should skip (lock held by do_call), not block
+            await asyncio.wait_for(
+                manager._health_check_server("srv"), timeout=5.0
+            )
+            # Now let the call finish
+            call_can_finish.set()
+
+        results = await asyncio.gather(do_call(), do_health_check())
+
+    assert results[0] == "slow_result"
+    # send_ping should NOT have been called (health check skipped)
+    mock_conn.send_ping.assert_not_awaited()
 
     await manager.stop_health_monitor()
     await manager.disconnect_server("srv")
@@ -1462,15 +1462,15 @@ async def test_call_tool_succeeds_after_health_monitor_reconnected(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_call_tool_retries_after_checkfirst_failure(tmp_path):
-    """When check-first also fails, full reconnect happens and retry succeeds."""
+async def test_call_tool_retry_fails_after_reconnect(tmp_path):
+    """When retry also fails after a successful reconnect, call_tool returns a clear error."""
     from unittest.mock import AsyncMock, MagicMock
 
     manager, store = await _make_manager(tmp_path)
     config = MCPServerConfig(name="srv", transport="sse", url="https://example.com")
     await manager.create_server(config)
 
-    # Initial connection — both call_tool attempts fail
+    # Initial connection — call_tool fails
     fail_conn = MagicMock()
     fail_conn.is_connected = True
     fail_conn.connect = AsyncMock()
@@ -1478,31 +1478,29 @@ async def test_call_tool_retries_after_checkfirst_failure(tmp_path):
     fail_conn.list_tools = AsyncMock(return_value=[])
     fail_conn.call_tool = AsyncMock(side_effect=RuntimeError("transport dead"))
 
-    # Reconnected connection — call_tool succeeds
-    good_conn = MagicMock()
-    good_conn.is_connected = True
-    good_conn.connect = AsyncMock()
-    good_conn.disconnect = AsyncMock()
-    good_conn.list_tools = AsyncMock(return_value=[])
-    good_conn.call_tool = AsyncMock(return_value="retry_success")
+    # Reconnected connection — call_tool also fails (different error)
+    still_bad_conn = MagicMock()
+    still_bad_conn.is_connected = True
+    still_bad_conn.connect = AsyncMock()
+    still_bad_conn.disconnect = AsyncMock()
+    still_bad_conn.list_tools = AsyncMock(return_value=[])
+    still_bad_conn.call_tool = AsyncMock(side_effect=RuntimeError("server error after reconnect"))
 
     call_count = 0
 
     def conn_factory(*args, **kwargs):
         nonlocal call_count
         call_count += 1
-        return fail_conn if call_count == 1 else good_conn
+        return fail_conn if call_count == 1 else still_bad_conn
 
     with patch("src.tools.mcp.MCPConnection", side_effect=conn_factory):
         await manager.connect_server("srv")
         result = await manager.call_tool("srv", "search", {"q": "test"})
 
-    # Should have succeeded after full reconnect
-    assert result == "retry_success"
-    # fail_conn.call_tool called twice: initial + check-first
-    assert fail_conn.call_tool.await_count == 2
-    # good_conn.call_tool called once: the retry after reconnect
-    good_conn.call_tool.assert_awaited_once()
+    assert isinstance(result, dict)
+    assert "error" in result
+    assert "Reconnected but retry also failed" in result["error"]
+    assert "server error after reconnect" in result["error"]
 
     await manager.stop_health_monitor()
     await manager.disconnect_server("srv")
@@ -1511,7 +1509,7 @@ async def test_call_tool_retries_after_checkfirst_failure(tmp_path):
 
 @pytest.mark.asyncio
 async def test_call_tool_auto_reconnect_does_not_block(tmp_path):
-    """call_tool returns within bounded time even if _connect_server_impl hangs."""
+    """call_tool returns within bounded time even if disconnect or connect hangs."""
     import asyncio
     from unittest.mock import AsyncMock, MagicMock
 
@@ -1519,14 +1517,19 @@ async def test_call_tool_auto_reconnect_does_not_block(tmp_path):
     config = MCPServerConfig(name="srv", transport="sse", url="https://example.com")
     await manager.create_server(config)
 
+    # First connection: disconnect hangs forever, call_tool fails
     mock_conn = MagicMock()
     mock_conn.is_connected = True
     mock_conn.connect = AsyncMock()
-    mock_conn.disconnect = AsyncMock()
+
+    async def hang_disconnect():
+        await asyncio.sleep(9999)
+
+    mock_conn.disconnect = AsyncMock(side_effect=hang_disconnect)
     mock_conn.list_tools = AsyncMock(return_value=[])
     mock_conn.call_tool = AsyncMock(side_effect=RuntimeError("transport dead"))
 
-    # Second connection: connect hangs forever
+    # Second connection: connect also hangs forever
     hang_conn = MagicMock()
     hang_conn.is_connected = False
 
@@ -1561,13 +1564,15 @@ async def test_call_tool_auto_reconnect_does_not_block(tmp_path):
     assert "timed out" in result["error"].lower()
 
     await manager.stop_health_monitor()
-    await manager.disconnect_server("srv")
+    # Clean up — use the impl directly since disconnect_server would try to
+    # disconnect the hanging connection again
+    manager._connections.pop("srv", None)
     await store.close()
 
 
 @pytest.mark.asyncio
 async def test_concurrent_ping_and_disconnect(tmp_path):
-    """_health_check_server and disconnect_server run concurrently without exceptions."""
+    """_health_check_server and disconnect_server run concurrently without deadlocking."""
     import asyncio
     from unittest.mock import AsyncMock, MagicMock
 
@@ -1575,7 +1580,8 @@ async def test_concurrent_ping_and_disconnect(tmp_path):
     config = MCPServerConfig(name="srv", transport="sse", url="https://example.com")
     await manager.create_server(config)
 
-    ping_event = asyncio.Event()
+    ping_started = asyncio.Event()
+    ping_can_finish = asyncio.Event()
 
     mock_conn = MagicMock()
     mock_conn.is_connected = True
@@ -1583,8 +1589,8 @@ async def test_concurrent_ping_and_disconnect(tmp_path):
     mock_conn.disconnect = AsyncMock()
 
     async def slow_ping():
-        await ping_event.wait()
-        raise RuntimeError("ping failed after disconnect")
+        ping_started.set()
+        await ping_can_finish.wait()
 
     mock_conn.send_ping = AsyncMock(side_effect=slow_ping)
     mock_conn.list_tools = AsyncMock(return_value=[])
@@ -1592,22 +1598,28 @@ async def test_concurrent_ping_and_disconnect(tmp_path):
     with patch("src.tools.mcp.MCPConnection", return_value=mock_conn):
         await manager.connect_server("srv")
 
-        # Run health_check_server and disconnect_server concurrently
+        # Run health_check_server and disconnect_server concurrently.
+        # The health check acquires the lock and holds it during the slow ping.
+        # disconnect_server blocks on the lock until the ping finishes.
         async def do_health_check():
             try:
                 await manager._health_check_server("srv")
             except Exception:
-                pass  # ping failure is expected
+                pass
 
         async def do_disconnect():
-            # Let the ping start first (it holds the lock, waiting on ping_event)
-            await asyncio.sleep(0.01)
+            # Let the ping start (it holds the lock)
+            await ping_started.wait()
             # Release the ping so the health check completes and releases the lock
-            ping_event.set()
-            # Now disconnect can acquire the lock
+            ping_can_finish.set()
+            # Now disconnect_server can acquire the lock
             await manager.disconnect_server("srv")
 
-        await asyncio.gather(do_health_check(), do_disconnect())
+        # Wrap in a timeout so the test fails fast if there's a deadlock
+        await asyncio.wait_for(
+            asyncio.gather(do_health_check(), do_disconnect()),
+            timeout=10.0,
+        )
 
     # Connection should be cleanly removed
     assert "srv" not in manager._connections

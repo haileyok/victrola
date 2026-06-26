@@ -513,30 +513,34 @@ class MCPManager:
     async def _health_check_server(self, name: str) -> None:
         """Ping a single server to verify the connection is alive.
 
-        Holds the per-server lock so the ping is serialized against
-        disconnect/reconnect from call_tool or disconnect_all.
+        Uses a short try-acquire on the per-server lock so a long-running
+        tool call doesn't block the health check — it just skips this iteration.
         """
-        async with self._get_lock(name):
+        lock = self._get_lock(name)
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=1.0)
+        except asyncio.TimeoutError:
+            logger.debug("Skipping health check for '%s' — lock held by active call", name)
+            return
+        try:
             conn = self._connections.get(name)
             if conn is None or not conn.is_connected:
                 return
             await conn.send_ping()
+        finally:
+            lock.release()
 
     async def _reconnect_server(self, name: str) -> bool:
         """Disconnect and reconnect a server under its lock.
         Uses auto=True (short OAuth callback timeout). Returns True on success.
 
-        Both the disconnect and the connect are bounded by an outer timeout so a
-        hanging stack-close or hung OAuth round-trip can't stall the health monitor.
-        The 5s callback_timeout alone does NOT bound the entire flow, since the SDK
-        issues additional HTTP requests before/after the callback.
+        The entire disconnect+connect sequence is bounded by _RECONNECT_TIMEOUT
+        so a hanging stack-close or hung OAuth round-trip can't stall the caller.
         """
         async with self._get_lock(name):
-            if name in self._connections:
-                await self._disconnect_server_impl(name)
             try:
                 await asyncio.wait_for(
-                    self._connect_server_impl(name, auto=True),
+                    self._reconnect_server_impl(name),
                     timeout=_RECONNECT_TIMEOUT,
                 )
                 return True
@@ -547,7 +551,15 @@ class MCPManager:
                 return False
             except Exception as e:
                 logger.warning("Auto-reconnect failed for '%s': %s", name, e)
+                if name in self._connections:
+                    await self._disconnect_server_impl(name)
                 return False
+
+    async def _reconnect_server_impl(self, name: str) -> None:
+        """Disconnect and reconnect. Caller must hold the per-server lock."""
+        if name in self._connections:
+            await self._disconnect_server_impl(name)
+        await self._connect_server_impl(name, auto=True)
 
     async def connect_all(self) -> None:
         """Connect to all enabled servers. Non-fatal on failure."""
@@ -719,34 +731,29 @@ class MCPManager:
     async def call_tool(
         self, server_name: str, tool_name: str, params: dict[str, Any]
     ) -> Any:
-        """Proxy a tool call to the MCP server."""
-        conn = self._connections.get(server_name)
-        if conn is None or not conn.is_connected:
-            return {
-                "error": f"MCP server '{server_name}' is not connected. "
-                "The operator can reconnect it via the web UI."
-            }
-        try:
-            return await conn.call_tool(tool_name, params)
-        except Exception as e:
-            logger.warning("MCP tool call failed: %s.%s: %s", server_name, tool_name, e)
-            # Attempt one reconnection + retry under the per-server lock.
-            # The full connect (including OAuth round-trips) is bounded by a 20s
-            # timeout so the agent isn't blocked indefinitely on a hung server.
-            async with self._get_lock(server_name):
-                # Health monitor may have already reconnected — check first
-                conn = self._connections.get(server_name)
-                if conn is not None and conn.is_connected:
-                    try:
-                        return await conn.call_tool(tool_name, params)
-                    except Exception:
-                        pass  # still failing, proceed to full reconnect
-                # Full disconnect + reconnect (bounded)
-                if server_name in self._connections:
-                    await self._disconnect_server_impl(server_name)
+        """Proxy a tool call to the MCP server.
+
+        Holds the per-server lock for the entire call so the health monitor
+        can't tear down the session mid-call. If the call fails, attempts one
+        bounded reconnection and retries.
+        """
+        async with self._get_lock(server_name):
+            conn = self._connections.get(server_name)
+            if conn is None or not conn.is_connected:
+                return {
+                    "error": f"MCP server '{server_name}' is not connected. "
+                    "The operator can reconnect it via the web UI."
+                }
+            try:
+                return await conn.call_tool(tool_name, params)
+            except Exception as e:
+                logger.warning("MCP tool call failed: %s.%s: %s", server_name, tool_name, e)
+                # Attempt one bounded reconnection + retry. The full disconnect
+                # + connect (including OAuth round-trips) is bounded by
+                # _RECONNECT_TIMEOUT so the agent isn't blocked indefinitely.
                 try:
                     await asyncio.wait_for(
-                        self._connect_server_impl(server_name, auto=True),
+                        self._reconnect_server_impl(server_name),
                         timeout=_RECONNECT_TIMEOUT,
                     )
                 except asyncio.TimeoutError:
@@ -754,6 +761,8 @@ class MCPManager:
                         await self._disconnect_server_impl(server_name)
                     return {"error": f"MCP tool call failed: {e}. Auto-reconnect timed out."}
                 except Exception as reconnect_err:
+                    if server_name in self._connections:
+                        await self._disconnect_server_impl(server_name)
                     return {"error": f"MCP tool call failed: {e}. Reconnect failed: {reconnect_err}"}
                 conn = self._connections.get(server_name)
                 if conn is None or not conn.is_connected:
