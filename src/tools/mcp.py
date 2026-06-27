@@ -64,7 +64,8 @@ _CONNECT_TIMEOUT = 30.0
 _CALL_TIMEOUT = 60.0
 
 # Bounded timeout for auto-reconnection (disconnect + reconnect).
-# Bounds the full OAuth flow (client registration, token exchange, callback).
+# Background reconnect never launches interactive OAuth — it only attempts a
+# silent token refresh — so this bounds transport teardown and the silent grant.
 _RECONNECT_TIMEOUT = 20.0
 
 # Best-effort timeout for closing an old transport during reconnect.
@@ -282,7 +283,11 @@ class MCPConnection:
         if self._stack is not None:
             try:
                 await self._stack.aclose()
-            except (Exception, asyncio.CancelledError):
+            except (Exception, asyncio.CancelledError, BaseExceptionGroup):
+                # aclose() surfaces an anyio BaseExceptionGroup (a BaseException,
+                # not an Exception) wrapping a CancelledError on transport
+                # teardown. This is the sole origin of that group; swallowing it
+                # here keeps it off every path that awaits disconnect().
                 logger.warning("Error closing MCP connection", exc_info=True)
             self._stack = None
 
@@ -474,9 +479,10 @@ class MCPManager:
         # build OAuth provider if needed
         oauth_provider = None
         if config.auth_type == "oauth" and config.url:
-            callback_timeout = 5.0 if auto else 300.0
+            # Background reconnect (auto=True) never launches interactive OAuth:
+            # silent token refresh only, else fail fast and quiet.
             oauth_provider = self._create_oauth_provider(
-                name, config.url, callback_timeout=callback_timeout
+                name, config.url, interactive=not auto
             )
 
         conn = MCPConnection(config, self._secret_manager, oauth_provider=oauth_provider)
@@ -571,6 +577,16 @@ class MCPManager:
                         await self._reconnect_server(name)
             except asyncio.CancelledError:
                 raise
+            except BaseExceptionGroup as eg:
+                # A bare `except CancelledError` does not match a group that
+                # *wraps* a cancellation, so split it out: re-raise cooperative
+                # cancellation as a bare CancelledError (which stop_health_monitor
+                # and the clause above both handle) and log any remaining error.
+                cancelled, rest = eg.split(asyncio.CancelledError)
+                if rest is not None:
+                    logger.warning("Unexpected error in health check loop", exc_info=rest)
+                if cancelled is not None:
+                    raise asyncio.CancelledError() from cancelled
             except Exception:
                 logger.warning("Unexpected error in health check loop", exc_info=True)
 
@@ -596,7 +612,8 @@ class MCPManager:
 
     async def _reconnect_server(self, name: str) -> bool:
         """Disconnect and reconnect a server under its lock.
-        Uses auto=True (short OAuth callback timeout). Returns True on success.
+        Uses auto=True: background reconnect never launches interactive OAuth
+        (silent token refresh only). Returns True on success.
 
         The entire disconnect+connect sequence is bounded by _RECONNECT_TIMEOUT.
         On timeout, the connection is popped from _connections without awaiting
@@ -652,6 +669,10 @@ class MCPManager:
             if not config.enabled:
                 continue
             if config.auth_type == "oauth":
+                # Startup and background reconnect treat OAuth divergently but
+                # for the same reason — neither may launch interactive consent:
+                # startup skips servers with no stored tokens entirely; the
+                # health-monitor reconnect (auto=True) does a silent refresh only.
                 # Only attempt OAuth servers that have stored tokens.
                 # Servers without tokens need initial authorization via the web UI.
                 status = await self.get_oauth_status_async(name)
@@ -661,8 +682,8 @@ class MCPManager:
                         "no stored tokens, authorize via the web UI", name
                     )
                     continue
-                # Use auto=True so the callback handler fails fast (5s) if
-                # tokens are expired and can't be refreshed, rather than
+                # Use auto=True so the callback handler fails fast and quiet if
+                # tokens are expired and can't be silently refreshed, rather than
                 # blocking startup waiting for an operator paste-back.
                 try:
                     await asyncio.wait_for(
@@ -1062,7 +1083,12 @@ class MCPManager:
     # -- internals --
 
     def _create_oauth_provider(
-        self, server_name: str, server_url: str, *, callback_timeout: float = 300.0
+        self,
+        server_name: str,
+        server_url: str,
+        *,
+        interactive: bool = True,
+        callback_timeout: float = 300.0,
     ) -> Any:
         """Create an OAuthClientProvider for a server.
 
@@ -1070,6 +1096,12 @@ class MCPManager:
         even when Victrola runs on a remote server. The redirect_handler stores
         the consent URL for the web UI. The callback_handler waits for the
         operator to paste the full redirect URL back via the web API.
+
+        Interactive mode (operator-initiated connect) advertises the consent
+        URL and waits up to ``callback_timeout`` for a paste-back. Non-interactive
+        mode (background reconnect) never launches the interactive grant: the
+        SDK attempts a silent token refresh first, and if that fails the handlers
+        fail fast and quietly so no consent prompt is advertised to anyone.
         """
         from mcp.client.auth import OAuthClientProvider
         from mcp.shared.auth import OAuthClientMetadata
@@ -1095,11 +1127,27 @@ class MCPManager:
         }
 
         async def redirect_handler(url: str) -> None:
+            if not interactive:
+                # Background reconnect: silent refresh only. Do not advertise a
+                # consent URL or pending paste prompt nobody will satisfy.
+                logger.debug(
+                    "Suppressing interactive OAuth consent URL for '%s' "
+                    "(background reconnect)", server_name
+                )
+                return
             self._oauth_state[server_name]["consent_url"] = url
             logger.info("OAuth consent URL for '%s': %s", server_name, url)
 
         async def callback_handler() -> tuple[str, str | None]:
             """Wait for the operator to paste the redirect URL via the web API."""
+            if not interactive:
+                # Background reconnect: fail fast instead of blocking on a
+                # paste-back that will never arrive. The silent token refresh
+                # path never reaches this handler.
+                raise RuntimeError(
+                    f"Interactive OAuth authorization required for "
+                    f"'{server_name}' — reconnect manually via the web UI"
+                )
             # Create a future that will be resolved when the operator
             # submits the redirect URL via the /oauth/callback endpoint
             loop = asyncio.get_event_loop()

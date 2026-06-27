@@ -1553,10 +1553,8 @@ async def test_call_tool_returns_error_when_reconnect_fails(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_oauth_auto_connect_uses_short_callback_timeout(tmp_path):
-    """_connect_server_impl(auto=True) passes callback_timeout=5.0 to _create_oauth_provider."""
-    from unittest.mock import AsyncMock, MagicMock
-
+async def test_oauth_auto_connect_is_non_interactive(tmp_path):
+    """auto=True builds a non-interactive OAuth provider; auto=False an interactive one."""
     manager, store = await _make_manager(tmp_path)
     config = MCPServerConfig(
         name="fastmail",
@@ -1572,33 +1570,248 @@ async def test_oauth_auto_connect_uses_short_callback_timeout(tmp_path):
     mock_conn.disconnect = AsyncMock()
     mock_conn.list_tools = AsyncMock(return_value=[])
 
-    captured_kwargs = {}
-
+    captured = {}
     original_create = manager._create_oauth_provider
 
-    def spy_create(server_name, server_url, *, callback_timeout=300.0):
-        captured_kwargs["callback_timeout"] = callback_timeout
-        return original_create(server_name, server_url, callback_timeout=callback_timeout)
+    def spy_create(server_name, server_url, *, interactive=True, callback_timeout=300.0):
+        captured["interactive"] = interactive
+        captured["callback_timeout"] = callback_timeout
+        return original_create(
+            server_name, server_url, interactive=interactive,
+            callback_timeout=callback_timeout,
+        )
 
     with patch.object(manager, "_create_oauth_provider", side_effect=spy_create):
         with patch("src.tools.mcp.MCPConnection", return_value=mock_conn):
-            # auto=True path
             await manager._connect_server_impl("fastmail", auto=True)
 
-    assert captured_kwargs.get("callback_timeout") == 5.0
+    assert captured["interactive"] is False
 
-    # Verify manual path uses 300.0
-    captured_kwargs.clear()
-    # Need to disconnect first
+    # Manual path is interactive with the full paste-back window.
+    captured.clear()
     await manager._disconnect_server_impl("fastmail")
     with patch.object(manager, "_create_oauth_provider", side_effect=spy_create):
         with patch("src.tools.mcp.MCPConnection", return_value=mock_conn):
             await manager._connect_server_impl("fastmail", auto=False)
 
-    assert captured_kwargs.get("callback_timeout") == 300.0
+    assert captured["interactive"] is True
+    assert captured["callback_timeout"] == 300.0
 
     await manager.stop_health_monitor()
     await manager.disconnect_server("fastmail")
+    await store.close()
+
+
+def _capture_oauth_handlers(manager, server_name, *, interactive):
+    """Build a provider with OAuthClientProvider stubbed; return its handlers."""
+    captured = {}
+
+    class _FakeProvider:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    with patch("mcp.client.auth.OAuthClientProvider", _FakeProvider):
+        manager._create_oauth_provider(
+            server_name, "https://example.com/mcp", interactive=interactive
+        )
+    return captured["redirect_handler"], captured["callback_handler"]
+
+
+@pytest.mark.asyncio
+async def test_interactive_oauth_provider_advertises_consent(tmp_path):
+    """Interactive handlers expose the consent URL and a pending paste future."""
+    import asyncio
+
+    manager, store = await _make_manager(tmp_path)
+    redirect_handler, callback_handler = _capture_oauth_handlers(
+        manager, "srv", interactive=True
+    )
+
+    await redirect_handler("https://consent.example/auth?x=1")
+    assert manager._oauth_state["srv"]["consent_url"] == "https://consent.example/auth?x=1"
+
+    task = asyncio.create_task(callback_handler())
+    await asyncio.sleep(0)
+    assert manager._oauth_state["srv"]["pending_callback"] is not None
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_non_interactive_oauth_provider_fails_fast(tmp_path):
+    """Non-interactive handlers never advertise consent and reject the callback."""
+    manager, store = await _make_manager(tmp_path)
+    redirect_handler, callback_handler = _capture_oauth_handlers(
+        manager, "srv", interactive=False
+    )
+
+    # redirect_handler must not advertise a consent URL or pending prompt.
+    await redirect_handler("https://consent.example/auth?x=1")
+    assert manager._oauth_state["srv"]["consent_url"] is None
+    assert manager._oauth_state["srv"]["pending_callback"] is None
+
+    # callback_handler fails fast instead of blocking on a paste-back.
+    with pytest.raises(RuntimeError, match="Interactive OAuth authorization required"):
+        await callback_handler()
+    assert manager._oauth_state["srv"]["pending_callback"] is None
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_swallows_base_exception_group(tmp_path):
+    """disconnect() containing a BaseExceptionGroup from aclose() returns cleanly."""
+    import asyncio
+
+    config = MCPServerConfig(name="srv", transport="sse", url="https://example.com")
+
+    # Direct disconnect: the chokepoint must swallow the group.
+    conn = MCPConnection(config, secret_manager=None)
+    conn._session = object()
+    fake_stack = MagicMock()
+    fake_stack.aclose = AsyncMock(
+        side_effect=BaseExceptionGroup("teardown", [asyncio.CancelledError()])
+    )
+    conn._stack = fake_stack
+
+    await conn.disconnect()  # must not raise
+    assert conn._stack is None
+    assert conn.is_connected is False
+
+    # Same group surfaced through the detached-disconnect wrapper — the exact
+    # surface where the observed unhandled-task-exception occurred.
+    from src.tools.mcp import _detached_disconnect
+
+    conn2 = MCPConnection(config, secret_manager=None)
+    conn2._session = object()
+    fake_stack2 = MagicMock()
+    fake_stack2.aclose = AsyncMock(
+        side_effect=BaseExceptionGroup("teardown", [asyncio.CancelledError()])
+    )
+    conn2._stack = fake_stack2
+
+    await _detached_disconnect(conn2)  # must not raise
+    assert conn2._stack is None
+    assert conn2.is_connected is False
+
+
+@pytest.mark.asyncio
+async def test_health_loop_survives_failed_oauth_reconnect(tmp_path):
+    """The health loop keeps running when an OAuth reconnect fails fast."""
+    import asyncio
+
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(
+        name="srv",
+        transport="streamable_http",
+        url="https://example.com/mcp",
+        auth_type="oauth",
+    )
+    await manager.create_server(config)
+
+    # First connection: ping raises so the loop attempts a reconnect.
+    dead_conn = MagicMock()
+    dead_conn.is_connected = True
+    dead_conn.connect = AsyncMock()
+    dead_conn.disconnect = AsyncMock()
+    dead_conn.send_ping = AsyncMock(side_effect=RuntimeError("connection dead"))
+    dead_conn.list_tools = AsyncMock(return_value=[])
+
+    # Reconnect's new connection fails (silent refresh impossible, fail fast).
+    new_conn = MagicMock()
+    new_conn.is_connected = False
+    new_conn.connect = AsyncMock(
+        side_effect=RuntimeError("Interactive OAuth authorization required for 'srv'")
+    )
+    new_conn.disconnect = AsyncMock()
+    new_conn.list_tools = AsyncMock(return_value=[])
+
+    call_count = 0
+
+    def conn_factory(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return dead_conn if call_count == 1 else new_conn
+
+    with patch("src.tools.mcp.MCPConnection", side_effect=conn_factory):
+        await manager.connect_server("srv")
+        # connect_server starts a monitor at the default interval; replace it
+        # with a fast one so the loop iterates within the test window.
+        await manager.stop_health_monitor()
+        manager.start_health_monitor(0.01)
+        # Drive the loop: ping fails -> reconnect fails -> server removed.
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if "srv" not in manager._connections:
+                break
+        assert "srv" not in manager._connections
+        assert not manager._health_task.done()
+
+    await manager.stop_health_monitor()
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_health_loop_propagates_group_wrapped_cancellation(tmp_path):
+    """A group wrapping a CancelledError stops the loop instead of being swallowed."""
+    import asyncio
+
+    manager, store = await _make_manager(tmp_path)
+    manager._connections["srv"] = MagicMock()
+
+    group = BaseExceptionGroup("teardown", [asyncio.CancelledError()])
+    with patch.object(manager, "_health_check_server", AsyncMock(side_effect=group)):
+        manager.start_health_monitor(0.001)
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if manager._health_task.done():
+                break
+
+    assert manager._health_task.done()
+    # The wrapped cancellation is re-raised as a bare CancelledError, so the
+    # task ends cancelled and stop_health_monitor tears it down without a group
+    # escaping to the caller.
+    assert manager._health_task.cancelled()
+    await manager.stop_health_monitor()  # must not raise
+    assert manager._health_task is None
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_health_loop_survives_non_cancellation_group(tmp_path):
+    """A group with no cancellation is logged and the loop continues."""
+    import asyncio
+
+    class _NonExc(BaseException):
+        pass
+
+    manager, store = await _make_manager(tmp_path)
+    manager._connections["srv"] = MagicMock()
+
+    calls = {"n": 0}
+
+    async def body(name):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise BaseExceptionGroup("teardown", [_NonExc()])
+        return None
+
+    with patch.object(manager, "_health_check_server", side_effect=body):
+        manager.start_health_monitor(0.001)
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if calls["n"] >= 2:
+                break
+        assert calls["n"] >= 2
+        assert not manager._health_task.done()
+
+    await manager.stop_health_monitor()
     await store.close()
 
 
@@ -2067,9 +2280,12 @@ async def test_connect_all_auto_connects_oauth_with_tokens(tmp_path):
     captured_kwargs = {}
     original_create = manager._create_oauth_provider
 
-    def spy_create(server_name, server_url, *, callback_timeout=300.0):
-        captured_kwargs["callback_timeout"] = callback_timeout
-        return original_create(server_name, server_url, callback_timeout=callback_timeout)
+    def spy_create(server_name, server_url, *, interactive=True, callback_timeout=300.0):
+        captured_kwargs["interactive"] = interactive
+        return original_create(
+            server_name, server_url, interactive=interactive,
+            callback_timeout=callback_timeout,
+        )
 
     with patch.object(manager, "_create_oauth_provider", side_effect=spy_create):
         with patch("src.tools.mcp.MCPConnection", return_value=mock_conn):
@@ -2077,8 +2293,8 @@ async def test_connect_all_auto_connects_oauth_with_tokens(tmp_path):
 
     # Server should be connected
     assert "fastmail" in manager._connections
-    # Auto-connect path should use the short callback timeout
-    assert captured_kwargs.get("callback_timeout") == 5.0
+    # Auto-connect path must build a non-interactive OAuth provider.
+    assert captured_kwargs.get("interactive") is False
 
     await manager.stop_health_monitor()
     await manager.disconnect_server("fastmail")
