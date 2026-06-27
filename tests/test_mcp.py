@@ -2334,3 +2334,81 @@ async def test_connect_all_oauth_failure_does_not_block(tmp_path):
 
     await manager.stop_health_monitor()
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_connect_all_survives_leaked_cancellation(tmp_path):
+    """A hung connect that leaks a CancelledError must not crash connect_all.
+
+    A timed-out MCP connect surfaces an anyio cancel-scope CancelledError (a
+    BaseException, not an Exception). Since the connect_all task itself is not
+    being cancelled, the error should be swallowed like any other failure.
+    """
+    import asyncio
+
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(
+        name="fastmail",
+        transport="streamable_http",
+        url="https://api.fastmail.com/mcp",
+        auth_type="oauth",
+        enabled=True,
+    )
+    await manager.create_server(config)
+
+    # Store a token so get_oauth_status_async returns "authorized"
+    await store.documents.create(
+        "mcptoken:fastmail",
+        json.dumps({"access_token": "tok", "token_type": "Bearer"}),
+    )
+
+    mock_conn = MagicMock()
+    mock_conn.is_connected = False
+    mock_conn.connect = AsyncMock(
+        side_effect=asyncio.CancelledError("Cancelled via cancel scope 0xdead")
+    )
+    mock_conn.disconnect = AsyncMock()
+
+    with patch("src.tools.mcp.MCPConnection", return_value=mock_conn):
+        # Must not raise — a leaked internal cancellation is non-fatal.
+        await manager.connect_all()
+
+    assert "fastmail" not in manager._connections
+
+    await manager.stop_health_monitor()
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_connect_all_propagates_genuine_cancellation(tmp_path):
+    """A real shutdown cancellation of the connect_all task must propagate."""
+    import asyncio
+
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(
+        name="local",
+        transport="streamable_http",
+        url="https://example.com/mcp",
+        enabled=True,
+    )
+    await manager.create_server(config)
+
+    mock_conn = MagicMock()
+    mock_conn.is_connected = False
+    mock_conn.disconnect = AsyncMock()
+
+    async def hang(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    mock_conn.connect = AsyncMock(side_effect=hang)
+
+    with patch("src.tools.mcp.MCPConnection", return_value=mock_conn):
+        task = asyncio.ensure_future(manager.connect_all())
+        # Let connect_all reach the hung connect, then cancel the task itself.
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    await manager.stop_health_monitor()
+    await store.close()

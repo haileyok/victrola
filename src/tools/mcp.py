@@ -73,6 +73,17 @@ _RECONNECT_TIMEOUT = 20.0
 _DETACHED_DISCONNECT_TIMEOUT = 10.0
 
 
+def _task_is_cancelling() -> bool:
+    """True when the current task has a pending genuine cancellation.
+
+    Distinguishes a real shutdown cancellation (which must propagate) from a
+    CancelledError that leaked out of an inner anyio cancel scope during a hung
+    connect or timeout (which is just a failure to swallow).
+    """
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
+
+
 async def _detached_disconnect(conn: "MCPConnection") -> None:
     """Close a connection in the background with a best-effort timeout.
 
@@ -690,6 +701,19 @@ class MCPManager:
                         self.connect_server(name, auto=True),
                         timeout=_CONNECT_TIMEOUT,
                     )
+                except asyncio.CancelledError:
+                    # A hung connect surfaces an anyio cancel-scope
+                    # CancelledError (a BaseException, not an Exception). It is
+                    # not a cancellation of this task, so swallow it like any
+                    # other connect failure. A genuine shutdown cancellation
+                    # leaves cancelling() > 0 and must propagate.
+                    if _task_is_cancelling():
+                        raise
+                    logger.warning(
+                        "Auto-connect of OAuth MCP server '%s' was cancelled "
+                        "internally (hung connect). Connect manually via the "
+                        "web UI.", name
+                    )
                 except (asyncio.TimeoutError, Exception) as e:
                     logger.warning(
                         "Failed to auto-connect OAuth MCP server '%s': %s. "
@@ -698,6 +722,18 @@ class MCPManager:
                 continue
             try:
                 await asyncio.wait_for(self.connect_server(name), timeout=_CONNECT_TIMEOUT)
+            except asyncio.CancelledError:
+                # A hung connect surfaces an anyio cancel-scope CancelledError
+                # (a BaseException, not an Exception). It is not a cancellation
+                # of this task, so swallow it like any other connect failure. A
+                # genuine shutdown cancellation leaves cancelling() > 0 and must
+                # propagate.
+                if _task_is_cancelling():
+                    raise
+                logger.warning(
+                    "Connection to MCP server '%s' was cancelled internally "
+                    "(hung connect); skipping.", name
+                )
             except (asyncio.TimeoutError, Exception) as e:
                 logger.warning(
                     "Failed to connect to MCP server '%s': %s", name, e
