@@ -199,7 +199,8 @@ class ToolExecutor:
                 "debug": [],
             }
 
-        self._write_generated_tools()
+        stub_path = self._write_stub_file()
+        stub_name = os.path.basename(stub_path)
 
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".ts", delete=False, dir=DENO_DIR
@@ -207,7 +208,7 @@ class ToolExecutor:
             # start by adding all the imports that we need...
             full_code = f"""
 import {{ output, debug }} from "./runtime.ts";
-import * as tools from "./tools.ts";
+import * as tools from "./{stub_name}";
 export {{ tools }};
 
 {code}
@@ -219,6 +220,7 @@ export {{ tools }};
             return await self._run_deno(temp_path)
         finally:
             os.unlink(temp_path)
+            os.unlink(stub_path)
 
     async def execute_custom_tool_code(
         self,
@@ -236,12 +238,13 @@ export {{ tools }};
                 "debug": [],
             }
 
-        self._write_generated_tools()
+        stub_path = self._write_stub_file()
+        stub_name = os.path.basename(stub_path)
 
         params_json = json.dumps(params)
         full_code = f"""
 import {{ output, debug }} from "./runtime.ts";
-import * as tools from "./tools.ts";
+import * as tools from "./{stub_name}";
 export {{ tools }};
 
 const params = {params_json};
@@ -264,6 +267,7 @@ const params = {params_json};
             )
         finally:
             os.unlink(temp_path)
+            os.unlink(stub_path)
 
     async def execute_condition_code(
         self,
@@ -308,12 +312,20 @@ import {{ output, debug }} from "./runtime.ts";
         finally:
             os.unlink(temp_path)
 
-    def _write_generated_tools(self) -> None:
-        """generate tool stubs and write them to the deno directory"""
+    def _write_stub_file(self) -> str:
+        """Write generated tool stubs to a unique file in DENO_DIR.
 
+        Each execution gets its own stub file so concurrent executions can't
+        observe a half-written file or a stub set written by another run. The
+        executor is shared across web, Discord, Signal, and the scheduler, so
+        executions overlap. Returns the stub path; the caller must unlink it.
+        """
         tools_ts = self._registry.generate_typescript_types()
-        tools_path = DENO_DIR / "tools.ts"
-        tools_path.write_text(tools_ts)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".ts", prefix="tools_", delete=False, dir=DENO_DIR
+        ) as f:
+            f.write(tools_ts)
+            return f.name
 
     @staticmethod
     def _kill_process(process: asyncio.subprocess.Process) -> None:

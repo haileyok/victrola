@@ -17,6 +17,10 @@ src/*.egg-info/
 
 victrola.log
 
+# Generated Deno tool stubs (written per-execution at runtime)
+src/tools/deno/tools.ts
+src/tools/deno/tools_*.ts
+
 # Frontend (web/)
 web/node_modules/
 web/*.tsbuildinfo
