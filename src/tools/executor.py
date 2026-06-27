@@ -323,6 +323,22 @@ import {{ output, debug }} from "./runtime.ts";
         except ProcessLookupError:
             pass
 
+    @staticmethod
+    def _minimal_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+        """Build a minimal environment for Deno subprocesses.
+
+        Only PATH (for binary resolution) and HOME (for Deno's cache dir)
+        are inherited from the parent. Arbitrary parent env vars — including
+        API keys and secrets — are never passed through unless explicitly
+        granted via *extra*.
+        """
+        env: dict[str, str] = {
+            k: os.environ[k] for k in ("PATH", "HOME") if k in os.environ
+        }
+        if extra:
+            env.update(extra)
+        return env
+
     async def _run_deno(self, script_path: str) -> dict[str, Any]:
         """run the input script in a deno subprocess"""
 
@@ -347,6 +363,7 @@ import {{ output, debug }} from "./runtime.ts";
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=self._minimal_env(),
         )
 
         return await self._process_deno_output(process)
@@ -396,14 +413,8 @@ import {{ output, debug }} from "./runtime.ts";
         args.append(script_path)
 
         # Don't inherit the parent env wholesale — it can contain MODEL_API_KEY
-        # and other secrets the tool was never granted. Keep only the minimum
-        # Deno needs (PATH for binary resolution, HOME for its cache dir) and
-        # then layer on the explicitly-declared secrets.
-        proc_env: dict[str, str] = {
-            k: os.environ[k] for k in ("PATH", "HOME") if k in os.environ
-        }
-        if env:
-            proc_env.update(env)
+        # and other secrets the tool was never granted.
+        proc_env = self._minimal_env(env)
 
         process = await asyncio.create_subprocess_exec(
             *args,
