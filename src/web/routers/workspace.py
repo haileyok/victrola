@@ -39,8 +39,19 @@ def _resolve_workspace_path(path: str) -> tuple[Path, Path]:
 
 
 def _compute_workspace_size(workspace: Path) -> int:
-    """Walk the workspace tree and sum file sizes."""
-    return sum(f.stat().st_size for f in workspace.rglob("*") if f.is_file())
+    """Walk the workspace tree and sum file sizes.
+
+    Catches OSError per-file so concurrent agent writes/deletes don't
+    cause a 500 on the listing endpoint.
+    """
+    total = 0
+    for f in workspace.rglob("*"):
+        try:
+            if f.is_file():
+                total += f.stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 @router.get("/workspace")
@@ -116,17 +127,20 @@ async def read_workspace_file(
 
     stat = target.stat()
 
-    # Check size before reading to avoid loading huge files into memory.
-    # The cap applies to what we read, not just what we return.
-    if stat.st_size > MAX_READ_SIZE:
-        # Read only the first MAX_READ_SIZE bytes, then decode.
+    # Always read at most MAX_READ_SIZE + 1 bytes from a single open file
+    # descriptor. This avoids a TOCTOU race where the agent grows the file
+    # between a stat() size check and a subsequent read_text() call.
+    try:
         with open(target, "rb") as f:
-            raw = f.read(MAX_READ_SIZE)
-        content = raw.decode("utf-8", errors="replace") + "\n... (truncated)"
+            raw = f.read(MAX_READ_SIZE + 1)
+    except OSError:
+        raise HTTPException(500, "Failed to read file")
+
+    # If we read more than MAX_READ_SIZE, the file is large — truncate
+    if len(raw) > MAX_READ_SIZE:
+        content = raw[:MAX_READ_SIZE].decode("utf-8", errors="replace") + "\n... (truncated)"
     else:
-        content = target.read_text(errors="replace")
-        if len(content) > MAX_READ_SIZE:
-            content = content[:MAX_READ_SIZE] + "\n... (truncated)"
+        content = raw.decode("utf-8", errors="replace")
 
     return {
         "path": path,

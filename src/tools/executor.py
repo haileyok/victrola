@@ -353,6 +353,10 @@ import {{ output, debug }} from "./runtime.ts";
         # spawn a subprocess that executes deno with minimal permissions. explicit deny flags
         # ensure these can't be escalated via dynamic imports or permission prompts.
         deno_read_path = str(DENO_DIR)
+        if "," in deno_read_path:
+            raise ValueError(
+                f"DENO_DIR must not contain commas (Deno permission separator): {deno_read_path!r}"
+            )
         workspace = _resolve_workspace()
         read_paths = [deno_read_path, workspace]
 
@@ -395,6 +399,10 @@ import {{ output, debug }} from "./runtime.ts";
         """
 
         deno_read_path = str(DENO_DIR)
+        if "," in deno_read_path:
+            raise ValueError(
+                f"DENO_DIR must not contain commas (Deno permission separator): {deno_read_path!r}"
+            )
 
         if allow_workspace:
             workspace = _resolve_workspace()

@@ -129,7 +129,7 @@ The workspace path is injected into every `execute_code` and custom tool block a
 - Symlink creation is not permitted
 - The workspace is visible to the operator via the web interface at `/workspace`
 - No npm packages — the agent vendors TypeScript source manually if needed
-- A configurable size limit prevents disk exhaustion
+- A configurable size limit monitors for disk exhaustion (soft limit with warning)
 
 ### Configuration
 
