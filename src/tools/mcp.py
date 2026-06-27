@@ -456,10 +456,10 @@ class MCPManager:
 
     # -- connection lifecycle --
 
-    async def connect_server(self, name: str) -> None:
+    async def connect_server(self, name: str, *, auto: bool = False) -> None:
         """Connect to a server, discover tools, and register approved tools."""
         async with self._get_lock(name):
-            await self._connect_server_impl(name)
+            await self._connect_server_impl(name, auto=auto)
         self.start_health_monitor(float(CONFIG.mcp_health_check_interval_seconds))
 
     async def _connect_server_impl(self, name: str, *, auto: bool = False) -> None:
@@ -651,14 +651,29 @@ class MCPManager:
         for name, config in list(self._servers.items()):
             if not config.enabled:
                 continue
-            # Skip OAuth servers — they need manual authorization via the web UI.
-            # Even if tokens are stored, they may be expired and the refresh flow
-            # can block for minutes waiting for a callback that won't come during startup.
             if config.auth_type == "oauth":
-                logger.info(
-                    "Skipping OAuth MCP server '%s' on startup — "
-                    "connect manually via the web UI", name
-                )
+                # Only attempt OAuth servers that have stored tokens.
+                # Servers without tokens need initial authorization via the web UI.
+                status = await self.get_oauth_status_async(name)
+                if status != "authorized":
+                    logger.info(
+                        "Skipping OAuth MCP server '%s' on startup — "
+                        "no stored tokens, authorize via the web UI", name
+                    )
+                    continue
+                # Use auto=True so the callback handler fails fast (5s) if
+                # tokens are expired and can't be refreshed, rather than
+                # blocking startup waiting for an operator paste-back.
+                try:
+                    await asyncio.wait_for(
+                        self.connect_server(name, auto=True),
+                        timeout=_CONNECT_TIMEOUT,
+                    )
+                except (asyncio.TimeoutError, Exception) as e:
+                    logger.warning(
+                        "Failed to auto-connect OAuth MCP server '%s': %s. "
+                        "Connect manually via the web UI.", name, e
+                    )
                 continue
             try:
                 await asyncio.wait_for(self.connect_server(name), timeout=_CONNECT_TIMEOUT)

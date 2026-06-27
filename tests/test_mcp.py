@@ -2031,3 +2031,90 @@ async def test_load_servers_skips_reserved_namespace(tmp_path):
     await manager.load_servers()
     assert "system" not in manager._servers
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_connect_all_auto_connects_oauth_with_tokens(tmp_path):
+    """connect_all auto-connects OAuth servers that have stored tokens,
+    using the short 5s callback timeout."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(
+        name="fastmail",
+        transport="streamable_http",
+        url="https://api.fastmail.com/mcp",
+        auth_type="oauth",
+        enabled=True,
+    )
+    await manager.create_server(config)
+
+    # Store a token so get_oauth_status_async returns "authorized"
+    await store.documents.create(
+        "mcptoken:fastmail",
+        json.dumps({"access_token": "tok", "token_type": "Bearer"}),
+    )
+
+    mock_tool = MagicMock()
+    mock_tool.name = "search"
+    mock_tool.description = "Search"
+    mock_tool.inputSchema = {"type": "object", "properties": {"q": {"type": "string"}}}
+
+    mock_conn = MagicMock()
+    mock_conn.is_connected = True
+    mock_conn.connect = AsyncMock()
+    mock_conn.list_tools = AsyncMock(return_value=[mock_tool])
+    mock_conn.disconnect = AsyncMock()
+
+    captured_kwargs = {}
+    original_create = manager._create_oauth_provider
+
+    def spy_create(server_name, server_url, *, callback_timeout=300.0):
+        captured_kwargs["callback_timeout"] = callback_timeout
+        return original_create(server_name, server_url, callback_timeout=callback_timeout)
+
+    with patch.object(manager, "_create_oauth_provider", side_effect=spy_create):
+        with patch("src.tools.mcp.MCPConnection", return_value=mock_conn):
+            await manager.connect_all()
+
+    # Server should be connected
+    assert "fastmail" in manager._connections
+    # Auto-connect path should use the short callback timeout
+    assert captured_kwargs.get("callback_timeout") == 5.0
+
+    await manager.stop_health_monitor()
+    await manager.disconnect_server("fastmail")
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_connect_all_oauth_failure_does_not_block(tmp_path):
+    """connect_all does not raise when an OAuth server's auto-connect fails."""
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(
+        name="fastmail",
+        transport="streamable_http",
+        url="https://api.fastmail.com/mcp",
+        auth_type="oauth",
+        enabled=True,
+    )
+    await manager.create_server(config)
+
+    # Store a token so get_oauth_status_async returns "authorized"
+    await store.documents.create(
+        "mcptoken:fastmail",
+        json.dumps({"access_token": "tok", "token_type": "Bearer"}),
+    )
+
+    mock_conn = MagicMock()
+    mock_conn.is_connected = False
+    mock_conn.connect = AsyncMock(side_effect=ConnectionRefusedError("server down"))
+    mock_conn.disconnect = AsyncMock()
+
+    with patch("src.tools.mcp.MCPConnection", return_value=mock_conn):
+        # Should not raise
+        await manager.connect_all()
+
+    # Server should not be connected
+    assert "fastmail" not in manager._connections
+
+    await manager.stop_health_monitor()
+    await store.close()
