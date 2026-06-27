@@ -382,3 +382,42 @@ def test_config_has_workspace_fields():
     assert hasattr(CONFIG, "workspace_max_size_mb")
     assert CONFIG.workspace_dir == "data/workspace"
     assert CONFIG.workspace_max_size_mb == 1024
+
+
+def test_config_rejects_comma_in_workspace_dir():
+    """Config validator should reject workspace_dir containing commas."""
+    from pydantic import ValidationError
+    from src.config import Config
+
+    with pytest.raises(ValidationError):
+        Config(workspace_dir="data/workspace,/tmp")
+
+
+def test_resolve_workspace_rejects_comma(tmp_path, monkeypatch):
+    """_resolve_workspace should raise on comma-containing paths (defense-in-depth)."""
+    comma_dir = tmp_path / "ws,evil"
+    comma_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(CONFIG, "workspace_dir", str(comma_dir))
+
+    from src.tools.executor import _resolve_workspace
+
+    with pytest.raises(ValueError, match="comma"):
+        _resolve_workspace()
+
+
+def test_web_read_large_file_does_not_load_full_content(workspace_app, temp_workspace):
+    """Reading a file larger than MAX_READ_SIZE should not load the full file."""
+    from src.web.routers.workspace import MAX_READ_SIZE
+
+    # Create a file larger than the read cap
+    large_content = "x" * (MAX_READ_SIZE + 4096)
+    (temp_workspace / "large.txt").write_text(large_content)
+
+    resp = workspace_app.get("/api/workspace/file", params={"path": "large.txt"})
+    assert resp.status_code == 200
+    data = resp.json()
+    # The returned content should be truncated, not the full file
+    assert "truncated" in data["content"]
+    assert len(data["content"]) < len(large_content)
+    # The reported size should be the real file size
+    assert data["size"] == len(large_content)

@@ -1,5 +1,6 @@
 from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -102,6 +103,19 @@ class Config(BaseSettings):
     non-loopback hostname (e.g. a Tailscale host like 'pikachu')."""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @field_validator("workspace_dir")
+    @classmethod
+    def _workspace_dir_no_comma(cls, v: str) -> str:
+        """Deno's --allow-read/--allow-write flags use commas as path separators.
+        A workspace path containing a comma would silently grant access to
+        extra directories, so reject it at config load time."""
+        if "," in v:
+            raise ValueError(
+                f"workspace_dir must not contain commas (Deno treats commas as "
+                f"path separators in permission flags): {v!r}"
+            )
+        return v
 
 
 CONFIG = Config()

@@ -20,6 +20,24 @@ MAX_EXECUTION_TIME = 60.0  # total wall-clock timeout in seconds
 DENO_MEMORY_LIMIT_MB = 256  # v8 heap limit
 
 
+def _resolve_workspace() -> str:
+    """Resolve the workspace directory to an absolute path.
+
+    Rejects paths containing commas — Deno's --allow-read/--allow-write flags
+    use commas as path separators, so a comma in the workspace path would
+    silently grant access to extra directories.
+    """
+    from src.config import CONFIG
+
+    workspace = str(Path(CONFIG.workspace_dir).resolve())
+    if "," in workspace:
+        raise ValueError(
+            f"workspace_dir must not contain commas (Deno treats commas as "
+            f"path separators in permission flags): {workspace!r}"
+        )
+    return workspace
+
+
 class ToolExecutor:
     """executor that runs Typescript code in a deno subprocess"""
 
@@ -204,9 +222,7 @@ class ToolExecutor:
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".ts", delete=False, dir=DENO_DIR
         ) as f:
-            from src.config import CONFIG
-
-            workspace_json = json.dumps(str(Path(CONFIG.workspace_dir).resolve()))
+            workspace_json = json.dumps(_resolve_workspace())
             # start by adding all the imports that we need...
             full_code = f"""
 import {{ output, debug }} from "./runtime.ts";
@@ -244,9 +260,7 @@ const WORKSPACE = {workspace_json};
         self._write_generated_tools()
 
         params_json = json.dumps(params)
-        from src.config import CONFIG
-
-        workspace_json = json.dumps(str(Path(CONFIG.workspace_dir).resolve()))
+        workspace_json = json.dumps(_resolve_workspace())
         full_code = f"""
 import {{ output, debug }} from "./runtime.ts";
 import * as tools from "./tools.ts";
@@ -338,10 +352,8 @@ import {{ output, debug }} from "./runtime.ts";
 
         # spawn a subprocess that executes deno with minimal permissions. explicit deny flags
         # ensure these can't be escalated via dynamic imports or permission prompts.
-        from src.config import CONFIG
-
         deno_read_path = str(DENO_DIR)
-        workspace = str(Path(CONFIG.workspace_dir).resolve())
+        workspace = _resolve_workspace()
         read_paths = [deno_read_path, workspace]
 
         process = await asyncio.create_subprocess_exec(
@@ -385,9 +397,7 @@ import {{ output, debug }} from "./runtime.ts";
         deno_read_path = str(DENO_DIR)
 
         if allow_workspace:
-            from src.config import CONFIG
-
-            workspace = str(Path(CONFIG.workspace_dir).resolve())
+            workspace = _resolve_workspace()
             args = [
                 "deno",
                 "run",

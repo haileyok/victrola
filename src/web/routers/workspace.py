@@ -116,9 +116,17 @@ async def read_workspace_file(
 
     stat = target.stat()
 
-    content = target.read_text(errors="replace")
-    if len(content) > MAX_READ_SIZE:
-        content = content[:MAX_READ_SIZE] + "\n... (truncated)"
+    # Check size before reading to avoid loading huge files into memory.
+    # The cap applies to what we read, not just what we return.
+    if stat.st_size > MAX_READ_SIZE:
+        # Read only the first MAX_READ_SIZE bytes, then decode.
+        with open(target, "rb") as f:
+            raw = f.read(MAX_READ_SIZE)
+        content = raw.decode("utf-8", errors="replace") + "\n... (truncated)"
+    else:
+        content = target.read_text(errors="replace")
+        if len(content) > MAX_READ_SIZE:
+            content = content[:MAX_READ_SIZE] + "\n... (truncated)"
 
     return {
         "path": path,
