@@ -21,6 +21,7 @@ from src.web.routers import (
     status,
     system_prompt,
     tools,
+    workspace,
 )
 
 # Methods that can change server state — these require Origin validation
@@ -79,6 +80,7 @@ def create_app(agent, executor, conversation_manager) -> FastAPI:
     app.include_router(mcp.router, prefix="/api")
     app.include_router(system_prompt.router, prefix="/api")
     app.include_router(memory.router, prefix="/api")
+    app.include_router(workspace.router, prefix="/api")
 
     static_dir = Path(__file__).parent / "static"
 

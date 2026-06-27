@@ -22,4 +22,9 @@ web/node_modules/
 web/*.tsbuildinfo
 web/dist-tsconfig/
 
+# Planning docs (personal scratch, never committed)
+docs/design-plans/
+docs/implementation-plans/
+docs/test-plans/
+
 .worktrees/

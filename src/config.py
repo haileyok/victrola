@@ -28,6 +28,13 @@ class Config(BaseSettings):
     data_dir: str = "data"
     """local directory for secrets, schedules, and other operator state"""
 
+    # workspace (agent file storage)
+    workspace_dir: str = "data/workspace"
+    """directory the agent can read and write files to (Deno-scoped)"""
+
+    workspace_max_size_mb: int = 1024
+    """soft limit for workspace size in MB; logged as a warning when exceeded"""
+
     # display
     context_limit: int = 200_000
     """approximate context window of the main model; used for the web UI context bar"""

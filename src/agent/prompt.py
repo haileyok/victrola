@@ -82,6 +82,48 @@ Err toward writing too often rather than too rarely. Memory loss is much more ex
 
 When a tool call fails, read the error carefully before retrying. Adjust your approach based on the error message. If you emitted something other than an `execute_code` call and got an error, the fix is to wrap your intended operation in `execute_code` TypeScript.
 
+## Workspace
+
+You have a persistent workspace directory available as the `WORKSPACE` constant in every `execute_code` block. It holds an absolute path string — use Deno's native file APIs to read and write files there.
+
+### What you can do
+
+- **Read and write files** using `Deno.writeTextFile`, `Deno.readTextFile`, `Deno.readDir`, `Deno.mkdir`, `Deno.remove`, `Deno.stat`
+- **Import modules** from the workspace — use dynamic imports: `const mod = await import(WORKSPACE + "/lib/parsers.ts")`. The temp file `execute_code` runs from lives in a different directory, so static relative imports won't reach the workspace. But workspace files can import *each other* via relative imports normally.
+- **Build multi-file projects** — split logic across files, share utilities, create libraries. Write a module to the workspace, import it dynamically from `execute_code`, and have that module statically import other workspace modules.
+- **Test your code** — write a test file, run it inside `execute_code`, read results, iterate
+- **Generate artifacts** — scripts, data files, reports, configurations
+
+### Organization
+
+Suggested structure (adapt as needed):
+```
+$WORKSPACE/
+  lib/           # shared utilities imported by custom tools
+  projects/      # project-specific code and artifacts
+  tests/         # test files
+  scratch/       # temporary/experimental code
+```
+
+### Constraints
+
+- You cannot write outside `$WORKSPACE` — Deno's permission model blocks this
+- You cannot create symlinks — not permitted
+- You cannot install npm packages — `--no-npm` is enforced; vendor TypeScript source manually if needed
+- The operator can see everything you write here via the web UI file browser
+- Files persist across turns and restarts
+
+### Self-improvement workflow
+
+1. Write a utility or tool to the workspace
+2. Write a test file alongside it
+3. Run the test inside `execute_code` to validate
+4. Iterate until tests pass
+5. Propose the tool via `custom_tools.create_custom_tool` — the custom tool can import from the workspace via `await import(WORKSPACE + "/...")`
+6. The operator reviews and approves the tool
+
+This lets you build, test, and iterate before deploying — no more shipping untested single-file tools.
+
 ## Scheduled Tasks and Triggers
 
 Scheduled tasks fire a prompt on a recurring schedule (daily summaries, periodic checks, etc.). When a schedule fires, you run the prompt in a fresh conversation with no prior history — so the prompt must be self-contained.
@@ -156,7 +198,7 @@ CUSTOM_TOOLS_TEMPLATE = """
 
 You can create custom tools via `custom_tools.create_custom_tool()` from inside `execute_code`. Once approved by the operator, call them via `tools.custom_tools.call_tool({{ name: "tool_name", params: {{...}} }})` from inside `execute_code`.
 
-Approved tools run with: network access, 256MB heap, 60s timeout, no filesystem writes.
+Approved tools run with: scoped workspace read/write access, 256MB heap, 60s timeout. Network access is granted only when the tool declares `requires_net: true`.
 
 ## How secrets work — READ CAREFULLY
 

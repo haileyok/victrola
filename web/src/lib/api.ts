@@ -13,6 +13,8 @@ import type {
   SystemPrompt,
   ToolDetail,
   ToolSummary,
+  WorkspaceFile,
+  WorkspaceListing,
 } from "./types";
 
 const API_BASE = "/api";
@@ -325,5 +327,25 @@ export const api = {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ redirect_url: redirectUrl }),
       },
+    ),
+
+  // -- workspace --
+
+  listWorkspace: (path = "") =>
+    fetchJSON<WorkspaceListing>(`${API_BASE}/workspace?path=${enc(path)}`),
+
+  readWorkspaceFile: (path: string) =>
+    fetchJSON<WorkspaceFile>(`${API_BASE}/workspace/file?path=${enc(path)}`),
+
+  deleteWorkspaceFile: (path: string) =>
+    fetchJSON<{ deleted: string }>(
+      `${API_BASE}/workspace/file?path=${enc(path)}`,
+      { method: "DELETE" },
+    ),
+
+  createWorkspaceDir: (path: string) =>
+    fetchJSON<{ created: string }>(
+      `${API_BASE}/workspace/dir?path=${enc(path)}`,
+      { method: "POST" },
     ),
 };

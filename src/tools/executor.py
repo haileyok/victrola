@@ -204,11 +204,16 @@ class ToolExecutor:
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".ts", delete=False, dir=DENO_DIR
         ) as f:
+            from src.config import CONFIG
+
+            workspace_json = json.dumps(str(Path(CONFIG.workspace_dir).resolve()))
             # start by adding all the imports that we need...
             full_code = f"""
 import {{ output, debug }} from "./runtime.ts";
 import * as tools from "./tools.ts";
 export {{ tools }};
+
+const WORKSPACE = {workspace_json};
 
 {code}
 """
@@ -239,12 +244,16 @@ export {{ tools }};
         self._write_generated_tools()
 
         params_json = json.dumps(params)
+        from src.config import CONFIG
+
+        workspace_json = json.dumps(str(Path(CONFIG.workspace_dir).resolve()))
         full_code = f"""
 import {{ output, debug }} from "./runtime.ts";
 import * as tools from "./tools.ts";
 export {{ tools }};
 
 const params = {params_json};
+const WORKSPACE = {workspace_json};
 
 // --- tool code ---
 {code}
@@ -304,6 +313,7 @@ import {{ output, debug }} from "./runtime.ts";
                 allow_net=allow_net,
                 env=env or {},
                 allow_tool_calls=False,
+                allow_workspace=False,
             )
         finally:
             os.unlink(temp_path)
@@ -328,12 +338,17 @@ import {{ output, debug }} from "./runtime.ts";
 
         # spawn a subprocess that executes deno with minimal permissions. explicit deny flags
         # ensure these can't be escalated via dynamic imports or permission prompts.
+        from src.config import CONFIG
+
         deno_read_path = str(DENO_DIR)
+        workspace = str(Path(CONFIG.workspace_dir).resolve())
+        read_paths = [deno_read_path, workspace]
+
         process = await asyncio.create_subprocess_exec(
             "deno",
             "run",
-            f"--allow-read={deno_read_path}",
-            "--deny-write",
+            f"--allow-read={','.join(read_paths)}",
+            f"--allow-write={workspace}",
             "--deny-net",
             "--deny-run",
             "--deny-env",
@@ -357,21 +372,43 @@ import {{ output, debug }} from "./runtime.ts";
         allow_net: bool = False,
         env: dict[str, str] | None = None,
         allow_tool_calls: bool = True,
+        allow_workspace: bool = True,
     ) -> dict[str, Any]:
-        """Run deno with configurable permissions for custom tools."""
+        """Run deno with configurable permissions for custom tools.
+
+        When ``allow_workspace`` is True (default, custom tools path), scoped
+        workspace read/write access is granted. When False (condition code
+        path), writes remain fully denied — condition scripts are side-effect
+        free by design.
+        """
 
         deno_read_path = str(DENO_DIR)
 
-        args = [
-            "deno",
-            "run",
-            f"--allow-read={deno_read_path}",
-            "--deny-write",
-            "--deny-run",
-            "--deny-ffi",
-            "--deny-sys",
-            "--no-prompt",
-        ]
+        if allow_workspace:
+            from src.config import CONFIG
+
+            workspace = str(Path(CONFIG.workspace_dir).resolve())
+            args = [
+                "deno",
+                "run",
+                f"--allow-read={deno_read_path},{workspace}",
+                f"--allow-write={workspace}",
+                "--deny-run",
+                "--deny-ffi",
+                "--deny-sys",
+                "--no-prompt",
+            ]
+        else:
+            args = [
+                "deno",
+                "run",
+                f"--allow-read={deno_read_path}",
+                "--deny-write",
+                "--deny-run",
+                "--deny-ffi",
+                "--deny-sys",
+                "--no-prompt",
+            ]
 
         if allow_net:
             # Allow outbound fetch() but NOT remote module loading —
