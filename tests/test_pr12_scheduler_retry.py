@@ -1,5 +1,7 @@
 """Tests for PR 12: Fix scheduler — advance last_run after callback success."""
 
+import asyncio
+
 import pytest
 from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock, MagicMock
@@ -100,3 +102,41 @@ def test_is_due_no_write_side_effect():
     # Should return True (due now) without writing to last_run
     assert result is True
     assert task.last_run is None  # unchanged
+
+
+@pytest.mark.asyncio
+async def test_slow_task_does_not_block_others(scheduler_with_store):
+    """A slow on_fire callback should not starve other due tasks.
+
+    On serial _tick, the slow task (first in dict order) blocks the fast
+    task indefinitely. With concurrent firing + a per-fire timeout, the
+    fast task completes within a bounded time.
+    """
+    s, _store = scheduler_with_store
+    s._fire_timeout = 0.5  # short timeout for test
+
+    fast_fired = asyncio.Event()
+
+    async def on_fire(name, prompt):
+        if name == "slow":
+            await asyncio.sleep(10)  # would block indefinitely without timeout
+        elif name == "fast":
+            fast_fired.set()
+        return "ok"
+
+    s._on_fire = on_fire
+
+    now = datetime.now(timezone.utc)
+    task_slow = ScheduledTask(name="slow", schedule="1h", prompt="slow")
+    task_slow.last_run = (now - timedelta(hours=2)).isoformat()
+    task_fast = ScheduledTask(name="fast", schedule="1h", prompt="fast")
+    task_fast.last_run = (now - timedelta(hours=2)).isoformat()
+
+    # slow is first so serial firing would block fast
+    s._tasks = {"slow": task_slow, "fast": task_fast}
+
+    await asyncio.wait_for(s._tick(), timeout=3.0)
+
+    assert fast_fired.is_set(), (
+        "fast task should have fired despite slow task blocking"
+    )
