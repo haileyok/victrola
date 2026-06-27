@@ -463,12 +463,10 @@ class TestChatSSE:
         resp = app_client.post("/api/sessions", json={"title": "concurrent"})
         rkey = resp.json()["rkey"]
 
-        # acquire the lock manually to simulate a chat in progress
-        from src.web.routers.chat import _session_locks
+        # mark the session as in-flight to simulate a chat in progress
+        from src.web.routers.chat import _in_flight
 
-        lock = asyncio.Lock()
-        app_client._loop.run_until_complete(lock.acquire())
-        _session_locks[rkey] = lock
+        _in_flight.add(rkey)
 
         try:
             resp = app_client.post(
@@ -476,7 +474,31 @@ class TestChatSSE:
             )
             assert resp.status_code == 409
         finally:
-            lock.release()
+            _in_flight.discard(rkey)
+
+    def test_chat_no_leak_after_completion(self, app_client):
+        """After a chat completes normally, the session must not be marked in-flight.
+
+        A client that disconnects before the stream body is consumed must not
+        leave the session permanently locked. The in-flight marker is set inside
+        the generator and removed in its finally block, so a never-iterated
+        generator (pre-iteration disconnect) leaks nothing.
+        """
+        from src.web.routers.chat import _in_flight
+
+        resp = app_client.post("/api/sessions", json={"title": "no-leak"})
+        rkey = resp.json()["rkey"]
+
+        # normal chat should succeed
+        resp = app_client.post(f"/api/sessions/{rkey}/chat", json={"message": "hello"})
+        assert resp.status_code == 200
+
+        # after completion, session must not be in-flight
+        assert rkey not in _in_flight
+
+        # a second chat on the same session should also succeed (not 409)
+        resp = app_client.post(f"/api/sessions/{rkey}/chat", json={"message": "again"})
+        assert resp.status_code == 200
 
 
 class TestMemory:

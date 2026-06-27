@@ -100,3 +100,46 @@ async def test_stderr_capped():
     # The stderr should be truncated
     assert "error" in result
     assert "truncated" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_stderr_drained_concurrently_no_deadlock():
+    """_process_deno_output must drain stderr concurrently.
+
+    Without concurrent stderr draining, a process that fills its stderr
+    pipe buffer deadlocks: it can't write more to stderr (pipe full), so
+    it can't write to stdout, and the stdout readline loop blocks until
+    the read timeout.
+
+    This fake encodes that contract: stdout.readline() blocks until
+    stderr.read() has been called. On current code, stderr is only read
+    AFTER the stdout loop, so readline blocks for the full read timeout.
+    """
+    stderr_drained = asyncio.Event()
+
+    class _Stdout:
+        async def readline(self):
+            await stderr_drained.wait()
+            return b""  # EOF
+
+    class _Stderr:
+        async def read(self, n=-1):
+            stderr_drained.set()
+            return b""  # EOF
+
+    process = MagicMock()
+    process.stdin = MagicMock()
+    process.stdout = _Stdout()
+    process.stderr = _Stderr()
+    process.returncode = 0
+    process.pid = 12345
+    process.wait = AsyncMock(return_value=0)
+
+    executor = ToolExecutor(registry=ToolRegistry(), ctx=ToolContext())
+
+    # Should complete quickly (< 5s). On current code this blocks for
+    # the full read timeout (~30s) because stderr is never drained.
+    await asyncio.wait_for(
+        executor._process_deno_output(process),
+        timeout=5.0,
+    )

@@ -141,8 +141,8 @@ class MemoryStore:
         """
         now = _now()
 
+        # Step 1: short locked read of current values
         async with self._write_lock:
-            # Fetch current values inside the lock to prevent read-modify-write races
             cur = await self._db.execute(
                 "SELECT content, metadata FROM memory_entries WHERE id = ?",
                 (id,),
@@ -154,25 +154,28 @@ class MemoryStore:
             current_content = row[0]
             current_meta = row[1]
 
-            new_content = content if content is not None else current_content
-            if metadata is not None:
-                new_meta = json.dumps(metadata)
-            else:
-                new_meta = current_meta
+        # Step 2: compute new values and regenerate embedding OUTSIDE the
+        # lock so a slow embed doesn't block all other store writes.
+        new_content = content if content is not None else current_content
+        if metadata is not None:
+            new_meta = json.dumps(metadata)
+        else:
+            new_meta = current_meta
 
-            # Regenerate embedding if content changed
-            new_embedding: bytes | None = None
-            regenerate_embedding = content is not None and self._embedding_client is not None
-            if regenerate_embedding:
-                try:
-                    new_embedding = await self._embedding_client.embed(new_content)
-                except Exception:
-                    logger.warning("Failed to regenerate embedding on update", exc_info=True)
-                    new_embedding = None
+        new_embedding: bytes | None = None
+        regenerate_embedding = content is not None and self._embedding_client is not None
+        if regenerate_embedding:
+            try:
+                new_embedding = await self._embedding_client.embed(new_content)
+            except Exception:
+                logger.warning("Failed to regenerate embedding on update", exc_info=True)
+                new_embedding = None
 
-            # Validate embedding size before storing
-            new_embedding = self._validate_embedding(new_embedding)
+        # Validate embedding size before storing
+        new_embedding = self._validate_embedding(new_embedding)
 
+        # Step 3: locked UPDATE with precomputed values
+        async with self._write_lock:
             try:
                 await self._db.execute("BEGIN IMMEDIATE")
                 if regenerate_embedding and new_embedding is not None:

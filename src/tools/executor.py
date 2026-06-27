@@ -323,6 +323,22 @@ import {{ output, debug }} from "./runtime.ts";
         except ProcessLookupError:
             pass
 
+    @staticmethod
+    def _minimal_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+        """Build a minimal environment for Deno subprocesses.
+
+        Only PATH (for binary resolution) and HOME (for Deno's cache dir)
+        are inherited from the parent. Arbitrary parent env vars — including
+        API keys and secrets — are never passed through unless explicitly
+        granted via *extra*.
+        """
+        env: dict[str, str] = {
+            k: os.environ[k] for k in ("PATH", "HOME") if k in os.environ
+        }
+        if extra:
+            env.update(extra)
+        return env
+
     async def _run_deno(self, script_path: str) -> dict[str, Any]:
         """run the input script in a deno subprocess"""
 
@@ -347,6 +363,7 @@ import {{ output, debug }} from "./runtime.ts";
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=self._minimal_env(),
         )
 
         return await self._process_deno_output(process)
@@ -396,14 +413,8 @@ import {{ output, debug }} from "./runtime.ts";
         args.append(script_path)
 
         # Don't inherit the parent env wholesale — it can contain MODEL_API_KEY
-        # and other secrets the tool was never granted. Keep only the minimum
-        # Deno needs (PATH for binary resolution, HOME for its cache dir) and
-        # then layer on the explicitly-declared secrets.
-        proc_env: dict[str, str] = {
-            k: os.environ[k] for k in ("PATH", "HOME") if k in os.environ
-        }
-        if env:
-            proc_env.update(env)
+        # and other secrets the tool was never granted.
+        proc_env = self._minimal_env(env)
 
         process = await asyncio.create_subprocess_exec(
             *args,
@@ -436,6 +447,35 @@ import {{ output, debug }} from "./runtime.ts";
 
         # Maximum stderr bytes to capture (prevents memory exhaustion)
         MAX_STDERR_SIZE = 64 * 1024
+
+        # Drain stderr concurrently to avoid a pipe-buffer deadlock: if the
+        # process fills the OS stderr pipe buffer (~64KB) while nobody is
+        # reading it, the process blocks on stderr write, never produces
+        # stdout, and the readline loop below deadlocks until the read
+        # timeout.
+        async def _drain_stderr() -> bytes:
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                try:
+                    chunk = await process.stderr.read(MAX_STDERR_SIZE)
+                except Exception:
+                    break
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total <= MAX_STDERR_SIZE:
+                    chunks.append(chunk)
+                else:
+                    excess = total - MAX_STDERR_SIZE
+                    keep = len(chunk) - excess
+                    if keep > 0:
+                        chunks.append(chunk[:keep])
+                    chunks.append(b"\n... (stderr truncated)")
+                    break
+            return b"".join(chunks)
+
+        stderr_task = asyncio.create_task(_drain_stderr())
 
         outputs: list[Any] = []
         debug_messages: list[str] = []
@@ -539,25 +579,17 @@ import {{ output, debug }} from "./runtime.ts";
 
         await process.wait()
 
-        # Read stderr with a size cap to prevent memory exhaustion
-        stderr_chunks: list[bytes] = []
-        stderr_total = 0
-        while True:
-            chunk = await process.stderr.read(MAX_STDERR_SIZE)
-            if not chunk:
-                break
-            stderr_total += len(chunk)
-            if stderr_total <= MAX_STDERR_SIZE:
-                stderr_chunks.append(chunk)
-            else:
-                # Truncate — keep what fits and add a marker
-                excess = stderr_total - MAX_STDERR_SIZE
-                keep = len(chunk) - excess
-                if keep > 0:
-                    stderr_chunks.append(chunk[:keep])
-                stderr_chunks.append(b"\n... (stderr truncated)")
-                break
-        stderr_content = b"".join(stderr_chunks)
+        # Await the concurrent stderr drain (the process has exited, so the
+        # stderr pipe will hit EOF quickly).
+        try:
+            stderr_content = await asyncio.wait_for(stderr_task, timeout=5.0)
+        except Exception:
+            stderr_task.cancel()
+            try:
+                await stderr_task
+            except Exception:
+                pass
+            stderr_content = b""
 
         if stderr_content:
             stderr_str = stderr_content.decode().strip()

@@ -96,11 +96,13 @@ class Scheduler:
         on_fire: Callable[[str, str], Awaitable[str]] | None = None,
         condition_runner: ConditionRunner | None = None,
         legacy_path: Path | None = None,
+        fire_timeout_seconds: int = 600,
     ) -> None:
         self._store = store
         self._on_fire = on_fire
         self._condition_runner = condition_runner
         self._legacy_path = legacy_path
+        self._fire_timeout = fire_timeout_seconds
         self._tasks: dict[str, ScheduledTask] = {}
         self._running = False
 
@@ -397,18 +399,35 @@ class Scheduler:
         self._running = False
 
     async def _tick(self) -> None:
-        """Check all tasks and fire any that are due."""
+        """Check all tasks and fire any that are due.
+
+        Due tasks are fired concurrently so one slow callback cannot
+        starve the others.
+        """
         now = datetime.now(timezone.utc)
 
+        due: list[ScheduledTask] = []
         for task in list(self._tasks.values()):
             if not task.enabled:
                 continue
-
             try:
                 if self._is_due(task, now):
-                    await self._fire(task, now)
+                    due.append(task)
             except Exception:
-                logger.exception("Error checking/firing schedule '%s'", task.name)
+                logger.exception("Error checking schedule '%s'", task.name)
+
+        if not due:
+            return
+
+        results = await asyncio.gather(
+            *(self._fire(t, now) for t in due),
+            return_exceptions=True,
+        )
+        for task, result in zip(due, results):
+            if isinstance(result, Exception):
+                logger.exception(
+                    "Error firing schedule '%s'", task.name, exc_info=result
+                )
 
     def _is_due(self, task: ScheduledTask, now: datetime) -> bool:
         """Check if a task is due to run."""
@@ -453,7 +472,10 @@ class Scheduler:
         # --- Agent wake ---
         if self._on_fire:
             try:
-                response = await self._on_fire(task.name, task.prompt)
+                response = await asyncio.wait_for(
+                    self._on_fire(task.name, task.prompt),
+                    timeout=self._fire_timeout,
+                )
                 logger.info(
                     "Schedule '%s' completed: %s",
                     task.name,
@@ -463,6 +485,15 @@ class Scheduler:
                 task.last_run = now.isoformat()
                 task._retry_count = 0
                 task._condition_retry_count = 0
+                await self._save_task(task)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Schedule '%s' callback timed out after %ds — "
+                    "advancing last_run to prevent infinite retries",
+                    task.name, self._fire_timeout,
+                )
+                task.last_run = now.isoformat()
+                task._retry_count = 0
                 await self._save_task(task)
             except Exception:
                 task._retry_count += 1

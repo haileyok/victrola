@@ -20,28 +20,17 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Per-session locks to serialize concurrent chat requests on the same session.
-# Without this, two simultaneous requests could interleave save/load/agent calls
-# and corrupt the conversation history.
-_session_locks: dict[str, asyncio.Lock] = {}
-# Guard dict mutation itself so check+create is atomic across concurrent requests.
+# Per-session in-flight tracking to serialize concurrent chat requests on the
+# same session. Without this, two simultaneous requests could interleave
+# save/load/agent calls and corrupt the conversation history.
+#
+# The session_id is added to _in_flight only when the event_stream generator
+# actually begins iterating — never before the StreamingResponse is returned.
+# This ensures a client that disconnects before the body is consumed cannot
+# leak the in-flight marker (which would permanently 409 the session).
+_in_flight: set[str] = set()
+# Guard set mutation itself so check+add is atomic across concurrent requests.
 _locks_guard = asyncio.Lock()
-
-
-async def _get_session_lock(session_id: str) -> asyncio.Lock:
-    async with _locks_guard:
-        if session_id not in _session_locks:
-            _session_locks[session_id] = asyncio.Lock()
-        return _session_locks[session_id]
-
-
-async def _release_session_lock(session_id: str, lock: asyncio.Lock) -> None:
-    """Release the lock and prune it from the dict if no one is waiting."""
-    async with _locks_guard:
-        lock.release()
-        # Only remove if no other task is waiting on it
-        if not lock.locked():
-            _session_locks.pop(session_id, None)
 
 
 def _sse(event: str, data: dict[str, Any] | None = None) -> str:
@@ -70,17 +59,21 @@ async def chat(
     if not user_text:
         raise HTTPException(400, "Message cannot be empty")
 
-    # Atomically acquire the per-session lock BEFORE returning the response.
-    # This ensures the 409 check and lock acquisition are not racy.
+    # Early peek: if a chat is already in-flight for this session, reject
+    # immediately. The authoritative check happens inside the generator to
+    # close the tiny race this peek can miss.
     async with _locks_guard:
-        if session_id not in _session_locks:
-            _session_locks[session_id] = asyncio.Lock()
-        lock = _session_locks[session_id]
-        if lock.locked():
+        if session_id in _in_flight:
             raise HTTPException(409, "A chat is already in progress for this session")
-        await lock.acquire()
 
     async def event_stream():
+        # Acquire the in-flight marker inside the generator so a client that
+        # disconnects before the body is consumed never leaks it.
+        async with _locks_guard:
+            if session_id in _in_flight:
+                yield _sse("error", {"message": "A chat is already in progress for this session"})
+                return
+            _in_flight.add(session_id)
         try:
             # 1. load full conversation history first — agent.chat() will
             # append the new user turn to this list in place
@@ -193,7 +186,8 @@ async def chat(
                     except (asyncio.CancelledError, Exception):
                         pass
         finally:
-            await _release_session_lock(session_id, lock)
+            async with _locks_guard:
+                _in_flight.discard(session_id)
 
     return StreamingResponse(
         event_stream(),

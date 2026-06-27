@@ -295,3 +295,66 @@ async def test_load_session_with_ids_no_drop_tail(tmp_path):
     assert msgs_keep[0]["content"] == "unanswered question"
 
     await store.close()
+
+
+async def test_compaction_does_not_orphan_tool_result(tmp_path):
+    """After compaction + repair, no tool_result lacks a matching tool_use.
+
+    Compaction splits purely by char budget, so it can land between an
+    assistant tool_use message and its user tool_result message — orphaning
+    the tool_result. _repair_conversation must neutralize such orphans.
+    """
+    sub_llm = _StubSubLLM("Compacted summary.")
+    agent, store, _ = await _make_agent_with_stub_client(
+        tmp_path, sub_llm=sub_llm, compact_threshold=500
+    )
+
+    conversation = []
+    # padding messages to push us over the threshold
+    for i in range(6):
+        conversation.append({
+            "role": "user" if i % 2 == 0 else "assistant",
+            "content": f"Padding message {i} " * 20,
+        })
+    # assistant tool_use message
+    conversation.append({
+        "role": "assistant",
+        "content": [{
+            "type": "tool_use", "id": "tool_1",
+            "name": "execute_code", "input": {"code": "1+1"},
+        }],
+    })
+    # user tool_result — large enough that the char-budget split keeps it
+    # in `recent` while its matching tool_use falls into `older`.
+    conversation.append({
+        "role": "user",
+        "content": [{
+            "type": "tool_result", "tool_use_id": "tool_1",
+            "content": "R" * 400,
+        }],
+    })
+
+    await agent._maybe_compact(conversation)
+    agent._repair_conversation(conversation)
+
+    # Collect all tool_use ids present in the conversation
+    tool_use_ids: set[str] = set()
+    for msg in conversation:
+        content = msg.get("content", [])
+        if msg["role"] == "assistant" and isinstance(content, list):
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "tool_use":
+                    tool_use_ids.add(b["id"])
+
+    # Assert: every tool_result has a matching tool_use
+    for msg in conversation:
+        content = msg.get("content", [])
+        if msg["role"] == "user" and isinstance(content, list):
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    assert b["tool_use_id"] in tool_use_ids, (
+                        f"Orphaned tool_result for tool_use_id={b['tool_use_id']} "
+                        f"with no matching tool_use in conversation"
+                    )
+
+    await store.close()

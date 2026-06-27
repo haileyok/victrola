@@ -192,6 +192,13 @@ class DiscordBot:
         self._agent = agent
         self._executor = executor
 
+        # Per-thread locks to serialize concurrent messages in the same
+        # Discord thread (which maps to a single chat session). Without
+        # this, two rapid messages interleave load/save/agent.chat and
+        # corrupt the conversation history.
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._locks_guard = asyncio.Lock()
+
         # Parse the allowlist of Discord user IDs
         raw_ids = CONFIG.discord_allowed_user_ids.strip()
         if raw_ids:
@@ -232,6 +239,13 @@ class DiscordBot:
             self._channel_name,
         )
 
+    async def _get_thread_lock(self, thread_id: str) -> asyncio.Lock:
+        """Return (or create) the per-thread serialization lock."""
+        async with self._locks_guard:
+            if thread_id not in self._session_locks:
+                self._session_locks[thread_id] = asyncio.Lock()
+            return self._session_locks[thread_id]
+
     async def on_message(self, message: discord.Message) -> None:
         # Ignore self and other bots
         if message.author == self._client.user or message.author.bot:
@@ -251,14 +265,21 @@ class DiscordBot:
         if thread is None:
             return  # not in our sessions channel
 
-        try:
-            await self._handle_message(message, thread)
-        except Exception as e:
-            logger.exception("Discord message handling failed")
+        lock = await self._get_thread_lock(str(thread.id))
+        async with lock:
             try:
-                await thread.send(f"⚠️ Error: `{type(e).__name__}`: {e}")
-            except Exception:
-                pass
+                await self._handle_message(message, thread)
+            except Exception as e:
+                logger.exception("Discord message handling failed")
+                try:
+                    await thread.send(f"⚠️ Error: `{type(e).__name__}`: {e}")
+                except Exception:
+                    pass
+        # Prune the lock if no other task is waiting on it
+        if not lock.locked():
+            async with self._locks_guard:
+                if not lock.locked():
+                    self._session_locks.pop(str(thread.id), None)
 
     async def _resolve_thread(
         self, message: discord.Message
