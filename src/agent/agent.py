@@ -733,6 +733,50 @@ class Agent:
             else:
                 i += 1
 
+        # Second pass: neutralize orphaned tool_results — tool_result blocks
+        # whose tool_use_id has no matching tool_use anywhere in the
+        # conversation. This happens when compaction's char-budget split
+        # removes an assistant tool_use message but leaves its tool_result,
+        # which the Anthropic API rejects with a 400.
+        all_tool_use_ids: set[str] = set()
+        for msg in conversation:
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content", [])
+            if not isinstance(content, list):
+                continue
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "tool_use":
+                    all_tool_use_ids.add(b["id"])
+
+        for i, msg in enumerate(conversation):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content", [])
+            if not isinstance(content, list):
+                continue
+            new_content: list = []
+            changed = False
+            for b in content:
+                if (
+                    isinstance(b, dict)
+                    and b.get("type") == "tool_result"
+                    and b.get("tool_use_id") not in all_tool_use_ids
+                ):
+                    new_content.append({
+                        "type": "text",
+                        "text": "[orphaned tool result removed]",
+                    })
+                    changed = True
+                    continue
+                new_content.append(b)
+            if changed:
+                logger.warning(
+                    "Neutralized orphaned tool_result(s) at conversation index %d",
+                    i,
+                )
+                conversation[i] = {**msg, "content": new_content}
+
     def _trim_old_tool_results(self, conversation: list[dict[str, Any]]) -> None:
         """Replace verbose tool_result content with a short summary for older messages.
 
