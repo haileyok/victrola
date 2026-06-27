@@ -437,6 +437,35 @@ import {{ output, debug }} from "./runtime.ts";
         # Maximum stderr bytes to capture (prevents memory exhaustion)
         MAX_STDERR_SIZE = 64 * 1024
 
+        # Drain stderr concurrently to avoid a pipe-buffer deadlock: if the
+        # process fills the OS stderr pipe buffer (~64KB) while nobody is
+        # reading it, the process blocks on stderr write, never produces
+        # stdout, and the readline loop below deadlocks until the read
+        # timeout.
+        async def _drain_stderr() -> bytes:
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                try:
+                    chunk = await process.stderr.read(MAX_STDERR_SIZE)
+                except Exception:
+                    break
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total <= MAX_STDERR_SIZE:
+                    chunks.append(chunk)
+                else:
+                    excess = total - MAX_STDERR_SIZE
+                    keep = len(chunk) - excess
+                    if keep > 0:
+                        chunks.append(chunk[:keep])
+                    chunks.append(b"\n... (stderr truncated)")
+                    break
+            return b"".join(chunks)
+
+        stderr_task = asyncio.create_task(_drain_stderr())
+
         outputs: list[Any] = []
         debug_messages: list[str] = []
         error: str | None = None
@@ -539,25 +568,17 @@ import {{ output, debug }} from "./runtime.ts";
 
         await process.wait()
 
-        # Read stderr with a size cap to prevent memory exhaustion
-        stderr_chunks: list[bytes] = []
-        stderr_total = 0
-        while True:
-            chunk = await process.stderr.read(MAX_STDERR_SIZE)
-            if not chunk:
-                break
-            stderr_total += len(chunk)
-            if stderr_total <= MAX_STDERR_SIZE:
-                stderr_chunks.append(chunk)
-            else:
-                # Truncate — keep what fits and add a marker
-                excess = stderr_total - MAX_STDERR_SIZE
-                keep = len(chunk) - excess
-                if keep > 0:
-                    stderr_chunks.append(chunk[:keep])
-                stderr_chunks.append(b"\n... (stderr truncated)")
-                break
-        stderr_content = b"".join(stderr_chunks)
+        # Await the concurrent stderr drain (the process has exited, so the
+        # stderr pipe will hit EOF quickly).
+        try:
+            stderr_content = await asyncio.wait_for(stderr_task, timeout=5.0)
+        except Exception:
+            stderr_task.cancel()
+            try:
+                await stderr_task
+            except Exception:
+                pass
+            stderr_content = b""
 
         if stderr_content:
             stderr_str = stderr_content.decode().strip()
