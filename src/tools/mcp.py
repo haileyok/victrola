@@ -903,6 +903,22 @@ class MCPManager:
                 }
             try:
                 return await conn.call_tool(tool_name, params)
+            except asyncio.TimeoutError:
+                # A call exceeding _CALL_TIMEOUT means the tool is slow, not
+                # that the connection is dead. Reconnecting the whole server
+                # here is futile (the retry would just time out again) and
+                # disruptive (it re-discovers and re-registers every tool and
+                # incurs OAuth round-trips). Return the timeout and leave the
+                # connection intact; the health monitor's ping reconnects
+                # genuinely dead links.
+                logger.warning(
+                    "MCP tool call timed out: %s.%s after %.0fs",
+                    server_name, tool_name, _CALL_TIMEOUT,
+                )
+                return {
+                    "error": f"MCP tool '{server_name}.{tool_name}' timed out "
+                    f"after {_CALL_TIMEOUT:.0f}s."
+                }
             except Exception as e:
                 logger.warning("MCP tool call failed: %s.%s: %s", server_name, tool_name, e)
                 # Attempt one bounded reconnection + retry. The full disconnect
