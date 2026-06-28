@@ -928,6 +928,7 @@ class Agent:
         conversation: list[dict[str, Any]],
         on_event: Callable[[AgentEvent], Awaitable[None]] | None = None,
         on_compact: Callable[[str, int], Awaitable[None]] | None = None,
+        on_message: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         images: list[dict[str, str]] | None = None,
     ) -> str:
         """Send a message and get a response, handling tool calls.
@@ -949,13 +950,28 @@ class Agent:
         that were summarized. Callers use this to persist a compaction checkpoint
         to the store so the summary can be reused on reload instead of
         re-summarizing from scratch.
+
+        `on_message` is an optional callback invoked once for each message the
+        agent appends to the conversation during the turn — every assistant
+        message (including ones carrying only tool_use blocks) and every
+        tool-results message. Callers use it to persist the full structured
+        turn so the agent's tool history survives across turns, instead of only
+        the final text reply. The current user message is not re-emitted here;
+        callers persist it themselves before calling chat().
         """
 
         async def _emit(event: AgentEvent) -> None:
             if on_event is not None:
                 await on_event(event)
 
-        return await self._chat_impl(user_message, conversation, _emit, on_compact=on_compact, images=images)
+        return await self._chat_impl(
+            user_message,
+            conversation,
+            _emit,
+            on_compact=on_compact,
+            on_message=on_message,
+            images=images,
+        )
 
     async def _chat_impl(
         self,
@@ -963,10 +979,25 @@ class Agent:
         conversation: list[dict[str, Any]],
         _emit: Callable[[AgentEvent], Awaitable[None]],
         on_compact: Callable[[str, int], Awaitable[None]] | None = None,
+        on_message: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         images: list[dict[str, str]] | None = None,
     ) -> str:
         """Inner chat loop. `conversation` is the caller-owned list that
         will be mutated in place. Do not call directly — go through `chat()`."""
+
+        async def _persist(message: dict[str, Any]) -> None:
+            """Hand a freshly-appended message to the on_message callback.
+
+            Serialization happens inside the callback, so later in-place
+            mutation of the conversation (trimming, repair) does not affect
+            what was persisted. Failures are logged but never abort the turn.
+            """
+            if on_message is None:
+                return
+            try:
+                await on_message(message)
+            except Exception:
+                logger.exception("on_message callback failed; continuing")
         # refresh the system prompt before each operator turn so that newly
         # added secrets, approved custom tools, self-note edits, and skills
         # show up without restarting the harness.
@@ -1069,6 +1100,7 @@ class Agent:
             if resp.reasoning_content:
                 assistant_msg["reasoning_content"] = resp.reasoning_content
             conversation.append(assistant_msg)
+            await _persist(assistant_msg)
 
             # find any tool calls that we need to handle
             if resp.stop_reason == "tool_use":
@@ -1108,7 +1140,9 @@ class Agent:
                             }
                         )
 
-                conversation.append({"role": "user", "content": tool_results})
+                tool_results_msg = {"role": "user", "content": tool_results}
+                conversation.append(tool_results_msg)
+                await _persist(tool_results_msg)
             else:
                 # once there are no more tool calls, we proceed to the text response
                 if total_usage:
@@ -1143,6 +1177,13 @@ class Agent:
         for block in resp.content:
             if isinstance(block, AgentTextBlock):
                 text_response += block.text
+        if text_response:
+            await _persist(
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": text_response}],
+                }
+            )
         if total_usage:
             logger.info("Chat total usage: %s", total_usage)
         return text_response

@@ -167,6 +167,76 @@ async def test_on_compact_callback_failure_does_not_crash(tmp_path):
     await store.close()
 
 
+async def test_on_message_persists_assistant_turn(tmp_path):
+    """on_message fires once with the assistant message on a no-tool turn."""
+    agent, store, mock_client = await _make_agent_with_stub_client(tmp_path)
+
+    received = []
+
+    async def on_message(message):
+        received.append(message)
+
+    await agent.chat("hi", conversation=[], on_message=on_message)
+
+    assert len(received) == 1
+    assert received[0]["role"] == "assistant"
+    assert received[0]["content"][0]["type"] == "text"
+    assert received[0]["content"][0]["text"] == "stub response"
+
+    await store.close()
+
+
+async def test_on_message_persists_full_tool_turn(tmp_path):
+    """on_message fires for the assistant tool_use turn, the tool_result turn,
+    and the final assistant text turn — in order."""
+    from src.agent.agent import AgentResponse, AgentTextBlock, AgentToolUseBlock
+
+    agent, store, mock_client = await _make_agent_with_stub_client(tmp_path)
+
+    mock_client.complete = AsyncMock(
+        side_effect=[
+            AgentResponse(
+                content=[
+                    AgentToolUseBlock(id="t1", name="execute_code", input={"code": "1"})
+                ],
+                stop_reason="tool_use",
+                usage={},
+            ),
+            AgentResponse(
+                content=[AgentTextBlock(text="done")],
+                stop_reason="end_turn",
+                usage={},
+            ),
+        ]
+    )
+    # Bypass the real Deno executor.
+    agent._handle_tool_call = AsyncMock(return_value={"output": "ok"})
+
+    received = []
+
+    async def on_message(message):
+        received.append(message)
+
+    await agent.chat("run it", conversation=[], on_message=on_message)
+
+    shape = [(m["role"], m["content"][0]["type"]) for m in received]
+    assert shape == [
+        ("assistant", "tool_use"),
+        ("user", "tool_result"),
+        ("assistant", "text"),
+    ]
+
+    await store.close()
+
+
+async def test_on_message_optional(tmp_path):
+    """chat() without on_message should work fine."""
+    agent, store, mock_client = await _make_agent_with_stub_client(tmp_path)
+    response = await agent.chat("test", conversation=[])
+    assert response == "stub response"
+    await store.close()
+
+
 async def test_load_session_with_ids_no_checkpoint(tmp_path):
     """load_session_with_ids returns messages and IDs with no compaction."""
     store = Store(path=tmp_path / "test.db")

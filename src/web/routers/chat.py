@@ -113,6 +113,15 @@ async def chat(
                         except Exception:
                             logger.exception("Failed to persist compaction checkpoint")
 
+            # Persist each structured message (assistant turns and tool-result
+            # turns) as the agent produces it, so the agent's tool history
+            # survives across turns instead of only the final text reply.
+            async def on_message(message: dict[str, Any]) -> None:
+                try:
+                    await conv_manager.save_message(session_id, message)
+                except Exception:
+                    logger.exception("Failed to persist conversation message")
+
             # 4. run agent.chat as a background task — agent.chat() appends
             # the user_message to the conversation list internally
             chat_task = asyncio.create_task(
@@ -121,6 +130,7 @@ async def chat(
                     conversation=conversation,
                     on_event=on_event,
                     on_compact=on_compact,
+                    on_message=on_message,
                     images=body.images,
                 )
             )
@@ -158,17 +168,10 @@ async def chat(
                 # 8. synthesize response event
                 yield _sse("response", {"text": response})
 
-                # 9. save assistant response
+                # 9. The structured turn (assistant + tool-result messages) was
+                # persisted incrementally via on_message during agent.chat();
+                # here we only auto-generate a session title.
                 if response:
-                    try:
-                        await conv_manager.save_message(
-                            session_id,
-                            {"role": "assistant", "content": response},
-                        )
-                    except Exception:
-                        logger.exception("Failed to persist assistant message")
-
-                    # 10. trigger title generation
                     try:
                         await maybe_generate_session_title(
                             store, session_id, executor.llm_client
@@ -176,7 +179,7 @@ async def chat(
                     except Exception:
                         logger.exception("Failed to auto-generate session title")
 
-                # 11. done
+                # 10. done
                 yield _sse("done", {})
             finally:
                 if not chat_task.done():

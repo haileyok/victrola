@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from src.agent.conversation import ConversationManager
 from src.signal_bot.bot import SignalBot
 from src.store.store import Store
 from src.tools.registry import ToolContext, ToolRegistry
@@ -133,19 +134,60 @@ async def test_signal_empty_message_ignored(signal_bot):
     agent.chat.assert_not_called()
 
 
-async def test_signal_persists_user_and_assistant_messages(signal_bot):
-    """User message and agent response are both saved to the store."""
+async def test_signal_persists_structured_turn(signal_bot):
+    """User message is saved up front; the agent's full structured turn
+    (assistant tool_use, tool_result, final text) is persisted via on_message."""
     bot, agent, store, mock_http = signal_bot
+
+    async def mock_chat(
+        user_text, conversation, on_compact=None, on_message=None, images=None
+    ):
+        assert on_message is not None
+        await on_message(
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "t1", "name": "execute_code", "input": {"code": "x"}}
+                ],
+            }
+        )
+        await on_message(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}
+                ],
+            }
+        )
+        await on_message(
+            {"role": "assistant", "content": [{"type": "text", "text": "agent response"}]}
+        )
+        return "agent response"
+
+    agent.chat = mock_chat
 
     msg = _make_signal_message("+2222222222", "test message")
     await bot._handle_message(msg)
 
-    # Check that both user and assistant messages were saved
     data = await store.chat.list_messages(session_id="signal-persistent", limit=100)
     messages = data["messages"]
-    assert len(messages) == 2
-    assert messages[0]["sender"] == "user"
-    assert messages[1]["sender"] == "assistant"
+    # user + assistant(tool_use) + tool_result(role=user) + assistant(text)
+    assert len(messages) == 4
+    assert [m["sender"] for m in messages] == ["user", "assistant", "user", "assistant"]
+
+    # The tool_use turn round-trips as structured content.
+    tool_use_turn = json.loads(messages[1]["content"])
+    assert tool_use_turn["content"][0]["type"] == "tool_use"
+
+    # And the agent would see the full structured history on the next turn.
+    conv_mgr = ConversationManager(ctx=bot._executor.ctx)
+    reloaded, _ = await conv_mgr.load_session_with_ids("signal-persistent")
+    types = [
+        (m["role"], m["content"][0]["type"] if isinstance(m["content"], list) else "text")
+        for m in reloaded
+    ]
+    assert ("assistant", "tool_use") in types
+    assert ("user", "tool_result") in types
 
 
 async def test_signal_compaction_persisted(signal_bot):
@@ -163,7 +205,9 @@ async def test_signal_compaction_persisted(signal_bot):
             content=json.dumps({"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}"}),
         )
 
-    async def mock_chat(user_text, conversation, on_compact=None, images=None):
+    async def mock_chat(
+        user_text, conversation, on_compact=None, on_message=None, images=None
+    ):
         if on_compact:
             # Simulate compacting 3 messages from the start
             await on_compact("test summary", 3)

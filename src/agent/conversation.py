@@ -25,14 +25,20 @@ class ConversationManager:
         return self._ctx.store
 
     async def save_message(self, session_id: str, message: dict[str, Any]) -> None:
-        """Save a message to the session as a chat message record."""
+        """Save a message to the session as a chat message record.
+
+        Structured content (lists of tool_use / tool_result / text blocks) is
+        embedded directly in the payload so a single ``json.loads`` on load
+        restores it as a list, keeping multi-block turns intact across reloads.
+        Pre-serializing the list here would double-encode it, and the agent
+        would later see a JSON string instead of structured blocks.
+        """
         role = message.get("role", "user")
         content = message.get("content", "")
 
-        # serialize structured content (tool results, multi-block assistant messages)
-        if isinstance(content, list):
-            content = json.dumps(content, default=str)
-        elif not isinstance(content, str):
+        # Coerce only exotic content to a string; strings and block lists are
+        # embedded as-is so the round-trip preserves structure.
+        if not isinstance(content, (str, list)):
             content = str(content)
 
         payload = json.dumps({"role": role, "content": content}, default=str)
