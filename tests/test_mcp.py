@@ -2412,3 +2412,27 @@ async def test_connect_all_propagates_genuine_cancellation(tmp_path):
 
     await manager.stop_health_monitor()
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_oauth_state_initialized_and_isolated_per_server(tmp_path):
+    """OAuth paste-back state is initialized up front and kept per-server.
+
+    The manager owns one ``_oauth_state`` dict keyed by server name. It exists
+    from construction (no lazy ``hasattr`` init), and building a provider for
+    one server only touches that server's entry — never the container — so
+    other servers' consent URLs and pending callbacks are preserved.
+    """
+    manager, store = await _make_manager(tmp_path)
+
+    # State exists before any provider is built.
+    assert manager._oauth_state == {}
+
+    manager._create_oauth_provider("srvA", "https://a.example/mcp")
+    manager._create_oauth_provider("srvB", "https://b.example/mcp")
+
+    assert set(manager._oauth_state) == {"srvA", "srvB"}
+    assert manager._oauth_state["srvA"]["pending_callback"] is None
+    assert manager._oauth_state["srvB"]["pending_callback"] is None
+
+    await store.close()

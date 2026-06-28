@@ -419,6 +419,8 @@ class MCPManager:
         self._connections: dict[str, MCPConnection] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._health_task: asyncio.Task | None = None
+        # Per-server OAuth paste-back state, keyed by server name.
+        self._oauth_state: dict[str, dict[str, Any]] = {}
 
     def _get_lock(self, name: str) -> asyncio.Lock:
         """Get or create a per-server lock for serializing operations."""
@@ -1154,9 +1156,7 @@ class MCPManager:
             scope=None,
         )
 
-        # Per-server state for the paste-back flow
-        if not hasattr(self, "_oauth_state"):
-            self._oauth_state: dict[str, dict[str, Any]] = {}
+        # Reset only this server's paste-back state; never the shared container.
         self._oauth_state[server_name] = {
             "consent_url": None,
             "pending_callback": None,
@@ -1231,7 +1231,7 @@ class MCPManager:
 
     def get_oauth_consent_url(self, name: str) -> str | None:
         """Return the OAuth consent URL if one was generated during connect."""
-        state = getattr(self, "_oauth_state", {}).get(name, {})
+        state = self._oauth_state.get(name, {})
         return state.get("consent_url")
 
     async def submit_oauth_callback(self, name: str, redirect_url: str) -> str:
@@ -1240,7 +1240,7 @@ class MCPManager:
         This resolves the pending callback handler and allows the OAuth flow
         to continue.
         """
-        state = getattr(self, "_oauth_state", {}).get(name, {})
+        state = self._oauth_state.get(name, {})
         future = state.get("pending_callback")
         if future is None or future.done():
             return f"No pending OAuth callback for '{name}'. Start a connection first."
