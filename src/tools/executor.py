@@ -83,6 +83,13 @@ def _scan_workspace_or_raise(workspace: str) -> None:
             it = os.scandir(current)
         except FileNotFoundError:
             continue
+        except OSError as exc:
+            # Fail closed: if we can't enumerate a directory we can't prove it's
+            # symlink/hardlink free, so don't grant write access.
+            raise WorkspaceError(
+                f"cannot scan the workspace ({exc}); refusing to run code that "
+                "writes to the workspace."
+            )
         with it:
             for entry in it:
                 if entry.is_symlink():
@@ -99,7 +106,15 @@ def _scan_workspace_or_raise(workspace: str) -> None:
                     st = entry.stat(follow_symlinks=False)
                 except OSError:
                     continue
-                if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+                if not stat.S_ISREG(st.st_mode):
+                    # FIFOs/sockets/device nodes are not supported workspace
+                    # artifacts and could be a planted DoS/escape vector.
+                    raise WorkspaceError(
+                        f"workspace contains a special file ({entry.path!r}); "
+                        "only regular files and directories are supported. "
+                        "Remove it and retry."
+                    )
+                if st.st_nlink > 1:
                     rec = multilink.get((st.st_dev, st.st_ino))
                     if rec is None:
                         multilink[(st.st_dev, st.st_ino)] = [st.st_nlink, 1]

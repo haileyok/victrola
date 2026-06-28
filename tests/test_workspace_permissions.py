@@ -609,3 +609,23 @@ def test_web_read_rejects_hardlink(workspace_app, temp_workspace, tmp_path):
     resp = workspace_app.get("/api/workspace/file", params={"path": "hl"})
     assert resp.status_code == 404
     assert outside.read_text() == "SECRET"
+
+
+async def test_deno_refuses_run_with_special_file(executor_with_workspace, temp_workspace):
+    """A planted special file (FIFO/device/socket) blocks execution — only
+    regular files and directories are supported workspace artifacts."""
+    os.mkfifo(temp_workspace / "pipe")
+    result = await executor_with_workspace.execute_code("output({ ok: true });")
+    assert result["success"] is False
+    assert "special file" in result["error"].lower()
+
+
+def test_web_list_rejects_hardlink_metadata(workspace_app, temp_workspace, tmp_path):
+    """Requesting a multi-linked file directly via list must not leak its
+    metadata (mirrors the read endpoint)."""
+    outside = tmp_path / "hl_meta.txt"
+    outside.write_text("SECRET")
+    os.link(outside, temp_workspace / "hl")
+
+    resp = workspace_app.get("/api/workspace", params={"path": "hl"})
+    assert resp.status_code == 404

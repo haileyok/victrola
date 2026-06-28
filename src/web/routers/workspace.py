@@ -84,6 +84,10 @@ async def list_workspace(
 
     if target.is_file():
         st = target.stat()
+        # Don't expose metadata for a multi-linked file either (possible
+        # hardlink to outside) — mirrors the read endpoint's policy.
+        if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+            raise HTTPException(404, "File not found")
         return {
             "type": "file",
             "name": target.name,
@@ -186,6 +190,13 @@ async def delete_workspace_file(
     executor: ToolExecutor = Depends(get_executor),
 ):
     """Delete a file or directory from the workspace."""
+    # _resolve_workspace_path rejects any symlink path component, so a planted
+    # static symlink can't redirect the delete out of the workspace. Note: this
+    # does NOT defend against an active local actor swapping an intermediate
+    # directory for a symlink between validation and rmtree (an intermediate-
+    # component TOCTOU). That's outside the agent threat model — the agent runs
+    # in Deno with --deny-run and cannot create symlinks or spawn processes —
+    # and a same-user local attacker could mutate the target directly anyway.
     workspace, target = _resolve_workspace_path(path)
 
     # Reject deleting the workspace root itself
