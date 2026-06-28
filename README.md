@@ -138,6 +138,36 @@ WORKSPACE_DIR=data/workspace
 WORKSPACE_MAX_SIZE_MB=1024
 ```
 
+### Saving web pages as PDFs (`web.save_url_as_pdf`)
+
+The agent can turn a URL into a PDF in its workspace: if the URL is already a
+PDF it's downloaded; otherwise the page is rendered with a headless Chromium
+(Playwright). It then reads the file from the workspace and can hand it to an
+upload tool.
+
+**Deploy (Linux):** `playwright` is a dependency; install the browser once:
+
+```bash
+playwright install --with-deps chromium
+```
+
+If Chromium won't launch on a locked-down host, set
+`WEB_PDF_CHROMIUM_NO_SANDBOX=1` (prefer running victrola as a non-root user / in
+a container over disabling Chromium's sandbox).
+
+**SSRF — required egress filtering.** Only public addresses are allowed. The
+*download* path is pinned in code (rebinding-safe). The *render* path uses a
+real browser that does its own DNS/redirects, so its authoritative protection is
+**host egress filtering**: the victrola process MUST be denied outbound access
+to loopback, link-local (169.254/16, incl. cloud metadata), RFC1918,
+CGNAT/tailnet (100.64/10), and unique-local ranges. Without that the render path
+is rebinding-exploitable. An nftables example is in the `web_pdf.py` module
+docstring. A hostile page can also try to exhaust memory while rendering — run
+victrola under an OS memory limit (cgroup/container) as the backstop.
+
+> End-to-end "send a web page to my device" also needs an upload tool (e.g. a
+> registered Supernote MCP server) for the agent to call after the PDF is saved.
+
 ## Storage
 
 Everything persistent lives under `./data/`:

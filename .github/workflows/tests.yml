@@ -31,6 +31,11 @@ jobs:
           pip install -e .
           pip install pytest pytest-asyncio
 
+      # web.save_url_as_pdf renders pages with headless Chromium via Playwright;
+      # install the browser + its OS deps so the render tests actually run.
+      - name: Install Playwright Chromium
+        run: python -m playwright install --with-deps chromium
+
       - name: Run tests
         run: |
           python -m pytest tests/ -v
