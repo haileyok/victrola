@@ -421,3 +421,121 @@ def test_web_read_large_file_does_not_load_full_content(workspace_app, temp_work
     assert len(data["content"]) < len(large_content)
     # The reported size should be the real file size
     assert data["size"] == len(large_content)
+
+
+# ---------------------------------------------------------------------------
+# Symlink-escape regression tests
+#
+# Deno authorizes a read/write THROUGH a symlink based on the link's location,
+# not its target, so a pre-existing symlink inside the workspace would turn
+# --allow-write=<workspace> into a write-outside primitive. The agent can't
+# create symlinks (covered above), but the workspace is persistent, so the
+# executor refuses to run while one exists and the web API refuses to follow it.
+# ---------------------------------------------------------------------------
+
+
+async def test_deno_refuses_run_when_workspace_has_symlink(
+    executor_with_workspace, temp_workspace, tmp_path
+):
+    """A pre-existing symlink in the workspace blocks execute_code (would
+    otherwise let scoped writes escape the workspace)."""
+    outside = tmp_path / "outside_secret.txt"
+    outside.write_text("ORIGINAL")
+    (temp_workspace / "escape").symlink_to(outside)  # planted, points outside
+
+    result = await executor_with_workspace.execute_code(
+        'await Deno.writeTextFile(WORKSPACE + "/escape", "CLOBBERED");\n'
+        "output({ ok: true });"
+    )
+    assert result["success"] is False, f"expected refusal, got: {result}"
+    assert "symlink" in result["error"].lower()
+    # The outside file must be untouched.
+    assert outside.read_text() == "ORIGINAL"
+
+
+async def test_deno_refuses_run_for_inside_pointing_symlink(
+    executor_with_workspace, temp_workspace
+):
+    """The guard rejects ANY symlink, even one pointing inside the workspace —
+    symlinks aren't a supported artifact and are the escape vector."""
+    (temp_workspace / "real.txt").write_text("x")
+    (temp_workspace / "inside_link").symlink_to(temp_workspace / "real.txt")
+
+    result = await executor_with_workspace.execute_code("output({ ok: true });")
+    assert result["success"] is False
+    assert "symlink" in result["error"].lower()
+
+
+async def test_custom_tool_refuses_run_when_workspace_has_symlink(
+    executor_with_workspace, temp_workspace, tmp_path
+):
+    """The custom-tool path enforces the same symlink guard."""
+    outside = tmp_path / "ct_outside.txt"
+    outside.write_text("ORIG")
+    (temp_workspace / "ln").symlink_to(outside)
+
+    result = await executor_with_workspace.execute_custom_tool_code(
+        'await Deno.writeTextFile(WORKSPACE + "/ln", "X");\noutput({ ok: true });',
+        params={},
+    )
+    assert result["success"] is False
+    assert "symlink" in result["error"].lower()
+    assert outside.read_text() == "ORIG"
+
+
+async def test_condition_code_runs_despite_workspace_symlink(
+    executor_with_workspace, temp_workspace, tmp_path
+):
+    """Condition code gets no workspace access, so the symlink guard does not
+    apply and it still runs (the guard is scoped to workspace-granting paths)."""
+    (temp_workspace / "ln").symlink_to(tmp_path / "whatever")  # dangling is fine
+    result = await executor_with_workspace.execute_condition_code("output({ ok: true });")
+    assert result["success"] is True
+
+
+async def test_workspace_over_quota_refuses_execution(
+    executor_with_workspace, temp_workspace, monkeypatch
+):
+    """Execution is refused when the workspace already exceeds its size quota."""
+    monkeypatch.setattr(CONFIG, "workspace_max_size_mb", 1)  # 1 MB cap
+    (temp_workspace / "big.bin").write_bytes(b"\0" * (2 * 1024 * 1024))  # 2 MB
+
+    result = await executor_with_workspace.execute_code("output({ ok: true });")
+    assert result["success"] is False
+    assert "size limit" in result["error"].lower()
+
+
+def test_web_read_rejects_symlink(workspace_app, temp_workspace, tmp_path):
+    """The read endpoint refuses to follow a symlink out of the workspace."""
+    outside = tmp_path / "secret.txt"
+    outside.write_text("SECRET")
+    (temp_workspace / "ln").symlink_to(outside)
+
+    resp = workspace_app.get("/api/workspace/file", params={"path": "ln"})
+    assert resp.status_code == 403
+
+
+def test_web_delete_rejects_symlink(workspace_app, temp_workspace, tmp_path):
+    """The delete endpoint refuses a symlink path and leaves the target intact."""
+    outside = tmp_path / "secret2.txt"
+    outside.write_text("SECRET")
+    (temp_workspace / "ln2").symlink_to(outside)
+
+    resp = workspace_app.delete("/api/workspace/file", params={"path": "ln2"})
+    assert resp.status_code == 403
+    assert outside.read_text() == "SECRET"  # untouched
+
+
+def test_web_list_skips_symlinks(workspace_app, temp_workspace, tmp_path):
+    """Listing skips symlink entries so it can't leak metadata about files
+    outside the workspace."""
+    outside = tmp_path / "exists.txt"
+    outside.write_text("data")
+    (temp_workspace / "real.txt").write_text("hi")
+    (temp_workspace / "ln3").symlink_to(outside)  # points at an existing outside file
+
+    resp = workspace_app.get("/api/workspace", params={"path": ""})
+    assert resp.status_code == 200
+    names = [e["name"] for e in resp.json()["entries"]]
+    assert "real.txt" in names
+    assert "ln3" not in names

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,12 +30,22 @@ def _resolve_workspace_path(path: str) -> tuple[Path, Path]:
     resolved path escapes the workspace.
     """
     workspace = Path(CONFIG.workspace_dir).resolve()
-    target = (workspace / path).resolve()
+    # Join + normalize LEXICALLY — do NOT follow symlinks during resolution.
+    target = Path(os.path.normpath(workspace / path))
 
-    try:
-        target.relative_to(workspace)
-    except ValueError:
+    # Lexical containment (catches ``..`` and absolute paths).
+    if target != workspace and workspace not in target.parents:
         raise HTTPException(403, "Path outside workspace")
+
+    # Reject any symlink component under the workspace so a planted symlink is
+    # never followed out of it. The agent cannot create symlinks, but the
+    # workspace is persistent and could be touched by other actors; the
+    # executor enforces the same no-symlink invariant before each run.
+    cur = workspace
+    for part in target.relative_to(workspace).parts:
+        cur = cur / part
+        if cur.is_symlink():
+            raise HTTPException(403, "Symlinks are not permitted in the workspace")
 
     return workspace, target
 
@@ -47,6 +59,8 @@ def _compute_workspace_size(workspace: Path) -> int:
     total = 0
     for f in workspace.rglob("*"):
         try:
+            if f.is_symlink():
+                continue
             if f.is_file():
                 total += f.stat().st_size
         except OSError:
@@ -66,26 +80,30 @@ async def list_workspace(
         raise HTTPException(404, "Path not found")
 
     if target.is_file():
-        stat = target.stat()
+        st = target.stat()
         return {
             "type": "file",
             "name": target.name,
-            "size": stat.st_size,
-            "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            "size": st.st_size,
+            "modified": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
         }
 
     # List directory contents
     entries = []
     for entry in sorted(target.iterdir()):
+        # Skip symlinks: they aren't a supported workspace artifact and
+        # following one could leak metadata about files outside the workspace.
+        if entry.is_symlink():
+            continue
         try:
-            stat = entry.stat()
+            st = entry.stat()
             entries.append(
                 {
                     "name": entry.name,
                     "type": "directory" if entry.is_dir() else "file",
-                    "size": stat.st_size if entry.is_file() else None,
+                    "size": st.st_size if entry.is_file() else None,
                     "modified": datetime.fromtimestamp(
-                        stat.st_mtime, tz=timezone.utc
+                        st.st_mtime, tz=timezone.utc
                     ).isoformat(),
                 }
             )
@@ -122,21 +140,22 @@ async def read_workspace_file(
     """Read a file's contents from the workspace."""
     _, target = _resolve_workspace_path(path)
 
-    if not target.is_file():
+    # Open with O_NOFOLLOW so a final-component symlink swapped in after
+    # validation cannot redirect the read outside the workspace, then operate
+    # on the file descriptor (fstat/read) rather than re-resolving the path.
+    try:
+        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
         raise HTTPException(404, "File not found")
 
-    stat = target.stat()
+    with os.fdopen(fd, "rb") as f:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            raise HTTPException(404, "File not found")
+        # Read at most MAX_READ_SIZE + 1 bytes so a file growing between checks
+        # can't blow up memory; truncate the response if it's larger.
+        raw = f.read(MAX_READ_SIZE + 1)
 
-    # Always read at most MAX_READ_SIZE + 1 bytes from a single open file
-    # descriptor. This avoids a TOCTOU race where the agent grows the file
-    # between a stat() size check and a subsequent read_text() call.
-    try:
-        with open(target, "rb") as f:
-            raw = f.read(MAX_READ_SIZE + 1)
-    except OSError:
-        raise HTTPException(500, "Failed to read file")
-
-    # If we read more than MAX_READ_SIZE, the file is large — truncate
     if len(raw) > MAX_READ_SIZE:
         content = raw[:MAX_READ_SIZE].decode("utf-8", errors="replace") + "\n... (truncated)"
     else:
@@ -145,8 +164,8 @@ async def read_workspace_file(
     return {
         "path": path,
         "content": content,
-        "size": stat.st_size,
-        "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        "size": st.st_size,
+        "modified": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
     }
 
 

@@ -38,6 +38,66 @@ def _resolve_workspace() -> str:
     return workspace
 
 
+class WorkspaceError(Exception):
+    """The workspace is in an unsafe state to grant to Deno.
+
+    Raised when the workspace contains a symlink (which could escape the
+    scoped write permission) or is already over its size quota.
+    """
+
+
+def _scan_workspace_or_raise(workspace: str) -> None:
+    """Pre-execution guard run before Deno is granted workspace access.
+
+    1. Reject ANY symlink in the workspace tree. Deno authorizes a read/write
+       *through* a symlink based on the link's location, not its target, so a
+       symlink inside the workspace turns ``--allow-write=<workspace>`` into a
+       write-outside primitive. The agent itself cannot create symlinks (Deno
+       denies it), but the workspace is persistent and an operator, a restored
+       backup, another local process, or a future upload path could plant one —
+       so we refuse to run rather than follow it.
+    2. Refuse when the workspace already exceeds the configured size quota,
+       bounding unbounded disk growth from agent writes.
+
+    A single ``scandir`` traversal does both; the symlink check short-circuits.
+    Cost is O(workspace entries) per execution — negligible for the expected
+    small workspaces.
+    """
+    from src.config import CONFIG
+
+    max_bytes = CONFIG.workspace_max_size_mb * 1024 * 1024
+    total = 0
+    stack = [workspace]
+    while stack:
+        current = stack.pop()
+        try:
+            it = os.scandir(current)
+        except FileNotFoundError:
+            continue
+        with it:
+            for entry in it:
+                if entry.is_symlink():
+                    raise WorkspaceError(
+                        f"workspace contains a symlink ({entry.path!r}); "
+                        "symlinks can escape the sandbox's scoped write "
+                        "permission and are not permitted. Remove it (e.g. via "
+                        "the workspace file browser) and retry."
+                    )
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(entry.path)
+                else:
+                    try:
+                        total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+    if max_bytes and total > max_bytes:
+        raise WorkspaceError(
+            f"workspace is over its size limit ({total} bytes > {max_bytes} "
+            f"bytes / {CONFIG.workspace_max_size_mb} MB). Free space before "
+            "running code that writes to the workspace."
+        )
+
+
 class ToolExecutor:
     """executor that runs Typescript code in a deno subprocess"""
 
@@ -238,6 +298,8 @@ const WORKSPACE = {workspace_json};
 
         try:
             return await self._run_deno(temp_path)
+        except WorkspaceError as e:
+            return {"success": False, "error": str(e), "debug": []}
         finally:
             os.unlink(temp_path)
 
@@ -285,6 +347,8 @@ const WORKSPACE = {workspace_json};
                 allow_net=allow_net,
                 env=env or {},
             )
+        except WorkspaceError as e:
+            return {"success": False, "error": str(e), "debug": []}
         finally:
             os.unlink(temp_path)
 
@@ -358,6 +422,9 @@ import {{ output, debug }} from "./runtime.ts";
                 f"DENO_DIR must not contain commas (Deno permission separator): {deno_read_path!r}"
             )
         workspace = _resolve_workspace()
+        # Refuse to run if the workspace contains a symlink (write-scope escape)
+        # or is over quota, before granting Deno --allow-write to it.
+        _scan_workspace_or_raise(workspace)
         read_paths = [deno_read_path, workspace]
 
         process = await asyncio.create_subprocess_exec(
@@ -406,6 +473,8 @@ import {{ output, debug }} from "./runtime.ts";
 
         if allow_workspace:
             workspace = _resolve_workspace()
+            # Same pre-execution guard as _run_deno before granting write scope.
+            _scan_workspace_or_raise(workspace)
             args = [
                 "deno",
                 "run",
