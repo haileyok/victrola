@@ -27,6 +27,11 @@ logger = logging.getLogger(__name__)
 
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MB
 
+# Fixed destination MCP server. NOT agent-controllable: letting the model choose
+# the server would let a prompt-injected agent route the file's bytes to any
+# other connected MCP (exfiltration).
+_UPLOAD_SERVER = "supernote"
+
 
 def _read_workspace_file(rel_path: str) -> tuple[bytes, str]:
     """Read a workspace-relative file safely; return (bytes, own_filename).
@@ -47,7 +52,9 @@ def _read_workspace_file(rel_path: str) -> tuple[bytes, str]:
         if cur.is_symlink():
             raise ValueError("symlinks are not permitted in the workspace path")
     try:
-        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+        # O_NONBLOCK so opening a FIFO/device doesn't block waiting for a writer;
+        # O_NOFOLLOW so a final-component symlink can't redirect the read.
+        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
         raise ValueError(f"cannot open {rel_path!r}: {exc}")
     # Validate the fd before fdopen (fdopen on a dir raises IsADirectoryError).
@@ -59,11 +66,18 @@ def _read_workspace_file(rel_path: str) -> tuple[bytes, str]:
             raise ValueError("refusing a multi-linked file (possible hardlink outside the workspace)")
         if st.st_size > MAX_UPLOAD_BYTES:
             raise ValueError(f"file exceeds {MAX_UPLOAD_BYTES} bytes")
+        with os.fdopen(fd, "rb") as f:  # takes ownership of fd, closes on exit
+            # Capped read: enforce the limit on the bytes actually read, in case
+            # the file grew after fstat.
+            data = f.read(MAX_UPLOAD_BYTES + 1)
+            if len(data) > MAX_UPLOAD_BYTES:
+                raise ValueError(f"file exceeds {MAX_UPLOAD_BYTES} bytes")
     except BaseException:
-        os.close(fd)
+        try:
+            os.close(fd)
+        except OSError:
+            pass
         raise
-    with os.fdopen(fd, "rb") as f:  # takes ownership of fd, closes on exit
-        data = f.read()
     return data, target.name
 
 
@@ -76,12 +90,11 @@ def _safe_name(name: str) -> str:
 @TOOL_REGISTRY.tool(
     name="files.upload_workspace_file",
     description=(
-        "Upload a file from the workspace to a registered MCP server's upload "
-        "tool (default: the Supernote cloud, which syncs to the device). Pass the "
-        "workspace-relative path; the file is read and base64-encoded host-side "
-        "and sent over HTTP, so it works for large files that can't be passed "
-        "inline. Use this to send a workspace PDF (e.g. one from "
-        "web.save_url_as_pdf) to the device."
+        "Upload a file from the workspace to the Supernote cloud (it syncs to "
+        "the device). Pass the workspace-relative path; the file is read and "
+        "base64-encoded host-side and sent over HTTP, so it works for large files "
+        "that can't be passed inline. Use this to send a workspace PDF (e.g. one "
+        "from web.save_url_as_pdf) to the device."
     ),
     parameters=[
         ToolParameter(
@@ -103,13 +116,6 @@ def _safe_name(name: str) -> str:
             required=False,
             default=None,
         ),
-        ToolParameter(
-            name="server",
-            type="string",
-            description="MCP server to upload via (must expose upload_file(filename, content_base64, dest)). Defaults to 'supernote'.",
-            required=False,
-            default="supernote",
-        ),
     ],
 )
 async def upload_workspace_file(
@@ -117,7 +123,6 @@ async def upload_workspace_file(
     path: str,
     dest: str = "Document",
     filename: str | None = None,
-    server: str = "supernote",
 ) -> dict[str, Any]:
     try:
         data, own_name = _read_workspace_file(path)
@@ -130,14 +135,14 @@ async def upload_workspace_file(
     name = _safe_name(filename or own_name)
     b64 = base64.b64encode(data).decode("ascii")
     result = await ctx.mcp_manager.call_tool(
-        server, "upload_file", {"filename": name, "content_base64": b64, "dest": dest}
+        _UPLOAD_SERVER, "upload_file", {"filename": name, "content_base64": b64, "dest": dest}
     )
     if isinstance(result, dict) and result.get("error"):
-        return {"error": f"upload via '{server}' failed: {result['error']}"}
+        return {"error": f"upload via '{_UPLOAD_SERVER}' failed: {result['error']}"}
 
     logger.info(
-        "upload_workspace_file: %s -> %s/%s via %s (%d bytes)",
-        path, dest, name, server, len(data),
+        "upload_workspace_file: %s -> %s/%s (%d bytes)",
+        path, dest, name, len(data),
     )
     return {
         "uploaded": True,
