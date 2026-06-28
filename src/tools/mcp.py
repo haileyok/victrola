@@ -1001,39 +1001,6 @@ class MCPManager:
         self._servers[config.name] = config
         return f"MCP server '{config.name}' created."
 
-    async def update_server(self, name: str, **fields: Any) -> str:
-        """Update an existing server config. Reconnects if connection-affecting fields change."""
-        async with self._get_lock(name):
-            config = self._servers.get(name)
-            if config is None:
-                return f"MCP server '{name}' not found."
-
-            connection_fields = {"transport", "url", "command", "args", "auth_token_secret", "env_secrets"}
-            needs_reconnect = False
-            was_connected = name in self._connections
-
-            for key, value in fields.items():
-                if value is None:
-                    continue
-                if key in connection_fields and getattr(config, key) != value:
-                    needs_reconnect = True
-                if hasattr(config, key):
-                    setattr(config, key, value)
-
-            await self._persist_server(name)
-
-            if needs_reconnect and was_connected:
-                # disconnect old connection, then reconnect under the same lock
-                if name in self._connections:
-                    await self._disconnect_server_impl(name)
-                try:
-                    await self._connect_server_impl(name)
-                except Exception as e:
-                    logger.warning("Failed to reconnect MCP server '%s': %s", name, e)
-                    return f"MCP server '{name}' updated, but reconnection failed: {e}"
-
-        return f"MCP server '{name}' updated."
-
     async def delete_server(self, name: str) -> str:
         """Delete a server — disconnects and unregisters tools first."""
         async with self._get_lock(name):
