@@ -2530,3 +2530,42 @@ async def test_call_tool_timeout_does_not_reconnect_server(tmp_path):
     await manager.stop_health_monitor()
     await manager.disconnect_server("srv")
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_detached_disconnect_retains_strong_reference(tmp_path):
+    """Background cleanup tasks must be strongly referenced until they finish.
+
+    A bare asyncio.create_task is only weakly referenced by the loop, so an
+    unreferenced cleanup task can be garbage-collected before it closes the
+    transport — leaking a stdio child process and its pipes. The manager must
+    retain the task until it completes, then drop it.
+    """
+    import asyncio
+
+    manager, store = await _make_manager(tmp_path)
+
+    assert manager._background_tasks == set()
+
+    release = asyncio.Event()
+
+    async def slow_disconnect():
+        await release.wait()
+
+    conn = MagicMock()
+    conn.disconnect = AsyncMock(side_effect=slow_disconnect)
+
+    manager._spawn_detached_disconnect(conn)
+
+    # A strong reference is held while the cleanup is in flight.
+    assert len(manager._background_tasks) == 1
+
+    release.set()
+    # Let the task complete and its done-callback fire.
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    conn.disconnect.assert_awaited_once()
+    assert manager._background_tasks == set()
+
+    await store.close()
