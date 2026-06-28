@@ -2435,4 +2435,49 @@ async def test_oauth_state_initialized_and_isolated_per_server(tmp_path):
     assert manager._oauth_state["srvA"]["pending_callback"] is None
     assert manager._oauth_state["srvB"]["pending_callback"] is None
 
+async def test_call_tool_timeout_does_not_reconnect_server(tmp_path):
+    """A slow-but-healthy tool that times out must not tear down the server.
+
+    A tool call exceeding _CALL_TIMEOUT raises asyncio.TimeoutError. A timeout
+    means the tool is slow, not that the connection is dead: call_tool must
+    return an error and leave the connection intact rather than reconnecting the
+    whole server (re-discovering/re-registering every tool, OAuth round-trips)
+    and retrying. Genuinely dead links are handled by the health monitor's ping.
+    """
+    import asyncio
+
+    manager, store = await _make_manager(tmp_path)
+    config = MCPServerConfig(name="srv", transport="sse", url="https://example.com")
+    await manager.create_server(config)
+
+    slow_conn = MagicMock()
+    slow_conn.is_connected = True
+    slow_conn.connect = AsyncMock()
+    slow_conn.disconnect = AsyncMock()
+    slow_conn.list_tools = AsyncMock(return_value=[])
+    slow_conn.call_tool = AsyncMock(side_effect=asyncio.TimeoutError())
+
+    conn_count = 0
+
+    def conn_factory(*args, **kwargs):
+        nonlocal conn_count
+        conn_count += 1
+        return slow_conn
+
+    with patch("src.tools.mcp.MCPConnection", side_effect=conn_factory):
+        await manager.connect_server("srv")
+        result = await manager.call_tool("srv", "search", {"q": "test"})
+
+    assert isinstance(result, dict) and "error" in result
+    assert "timed out" in result["error"].lower()
+    # No reconnect: the tool was called exactly once (no retry) and no second
+    # connection was constructed.
+    slow_conn.call_tool.assert_awaited_once()
+    assert conn_count == 1, "call_tool reconnected the server on a slow-tool timeout"
+    slow_conn.disconnect.assert_not_awaited()
+    # The connection is left intact for the next call.
+    assert manager.is_connected("srv")
+
+    await manager.stop_health_monitor()
+    await manager.disconnect_server("srv")
     await store.close()
