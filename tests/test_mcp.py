@@ -2415,6 +2415,55 @@ async def test_connect_all_propagates_genuine_cancellation(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_set_tokens_propagates_real_update_error():
+    """A non-not-found update failure must not be masked by a conflicting create.
+
+    Only a genuine "document does not exist yet" (StoreNotFound) should fall
+    back to create. A transient update error while the token doc already exists
+    must propagate, not trigger a create that StoreConflicts and gets swallowed
+    — which would silently drop a refreshed token.
+    """
+    from src.store.store import StoreConflict
+    from src.tools.mcp import MCPOAuthTokenStorage
+
+    documents = MagicMock()
+    documents.update = AsyncMock(side_effect=RuntimeError("db locked"))
+    documents.create = AsyncMock(side_effect=StoreConflict("exists"))
+    store = MagicMock()
+    store.documents = documents
+
+    storage = MCPOAuthTokenStorage(store, "srv")
+    tokens = MagicMock()
+    tokens.model_dump.return_value = {"access_token": "x"}
+
+    with pytest.raises(RuntimeError):
+        await storage.set_tokens(tokens)
+
+    documents.create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_set_tokens_creates_on_first_write():
+    """A missing token document (StoreNotFound) falls back to create."""
+    from src.store.store import StoreNotFound
+    from src.tools.mcp import MCPOAuthTokenStorage
+
+    documents = MagicMock()
+    documents.update = AsyncMock(side_effect=StoreNotFound("nope"))
+    documents.create = AsyncMock()
+    store = MagicMock()
+    store.documents = documents
+
+    storage = MCPOAuthTokenStorage(store, "srv")
+    tokens = MagicMock()
+    tokens.model_dump.return_value = {"access_token": "x"}
+
+    await storage.set_tokens(tokens)
+
+    documents.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_call_tool_timeout_does_not_reconnect_server(tmp_path):
     """A slow-but-healthy tool that times out must not tear down the server.
 
