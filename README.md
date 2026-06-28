@@ -162,7 +162,8 @@ real browser that does its own DNS/redirects, so its authoritative protection is
 to loopback, link-local (169.254/16, incl. cloud metadata), RFC1918,
 CGNAT/tailnet (100.64/10), and unique-local ranges. Without that the render path
 is rebinding-exploitable. An nftables example is in the `web_pdf.py` module
-docstring.
+docstring. A hostile page can also try to exhaust memory while rendering — run
+victrola under an OS memory limit (cgroup/container) as the backstop.
 
 > End-to-end "send a web page to my device" also needs an upload tool (e.g. a
 > registered Supernote MCP server) for the agent to call after the PDF is saved.

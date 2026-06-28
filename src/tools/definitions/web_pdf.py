@@ -37,6 +37,10 @@ Only public (globally-routable) addresses are allowed.
 Chromium's own process sandbox is kept ON by default; set
 ``WEB_PDF_CHROMIUM_NO_SANDBOX=1`` only if the host can't otherwise launch it
 (prefer running victrola as a non-root user / in a container instead).
+
+A hostile page can also try to exhaust memory while rendering. We bound render
+time (page.pdf timeout) and concurrent renders, but the authoritative protection
+is again deploy-level: run victrola under an OS memory limit (cgroup/container).
 """
 from __future__ import annotations
 
@@ -60,7 +64,8 @@ logger = logging.getLogger(__name__)
 
 MAX_BYTES = 100 * 1024 * 1024  # 100 MB cap on download / rendered PDF
 MAX_REDIRECTS = 5
-RENDER_TIMEOUT_MS = 30_000
+RENDER_TIMEOUT_MS = 30_000  # page navigation timeout
+RENDER_PDF_TIMEOUT_S = 30  # cap on page.pdf() so a hostile page can't run forever
 MAX_CONCURRENT_RENDERS = 2  # bound concurrent Chromium launches (memory/CPU)
 
 # NAT64 translation prefixes (RFC 6052/8215); embedded IPv4 is in the low 32 bits.
@@ -231,7 +236,13 @@ async def _render_pdf(url: str) -> bytes:
                 page = await browser.new_page()
                 await page.route("**/*", _guard_route)
                 await page.goto(url, wait_until="load", timeout=RENDER_TIMEOUT_MS)
-                return await page.pdf(format="A4", print_background=True)
+                # Bound page.pdf(): a hostile page can otherwise build an
+                # enormous document. This caps time; cap memory at the OS layer
+                # (run the render process under a cgroup/container memory limit).
+                return await asyncio.wait_for(
+                    page.pdf(format="A4", print_background=True),
+                    timeout=RENDER_PDF_TIMEOUT_S,
+                )
             finally:
                 await browser.close()
 
@@ -260,7 +271,9 @@ def _write_to_workspace(name: str, data: bytes) -> str:
     ENTRY, so even if `name` is already a symlink or a hardlink to a file
     OUTSIDE the workspace, that outside inode is never written through.
     """
-    workspace = Path(CONFIG.workspace_dir)
+    # resolve() the root (matches executor / workspace router) so a symlinked
+    # workspace_dir anchors to its real target consistently.
+    workspace = Path(CONFIG.workspace_dir).resolve()
     workspace.mkdir(parents=True, exist_ok=True)
     dest = workspace / name
     tmp = workspace / f".{name}.{os.getpid()}.{uuid4().hex}.tmp"

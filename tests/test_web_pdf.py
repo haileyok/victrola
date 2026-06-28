@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import socket
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -155,9 +156,24 @@ async def test_download_pins_validated_ip(temp_workspace, monkeypatch):
     out = await save_url_as_pdf(ToolContext(http_client=client), "http://example.test/p.pdf")
     assert out["kind"] == "downloaded"
     call = client.calls[0]
-    assert "93.184.216.34" in call["url"]            # connected to the validated IP
+    parsed = urlsplit(call["url"])
+    assert parsed.scheme == "http" and parsed.netloc == "93.184.216.34"  # exact pin
     assert call["headers"]["Host"] == "example.test"
     assert call["extensions"]["sni_hostname"] == "example.test"
+
+
+async def test_write_resolves_symlinked_workspace_root(tmp_path, monkeypatch):
+    """A symlinked workspace_dir anchors to its real target (matches executor)."""
+    real = tmp_path / "real_ws"
+    real.mkdir()
+    link = tmp_path / "ws_link"
+    os.symlink(real, link)
+    monkeypatch.setattr(CONFIG, "workspace_dir", str(link))
+
+    ctx = _ctx([_FakeStream(PDF_BYTES, "application/pdf")])
+    out = await save_url_as_pdf(ctx, "http://1.1.1.1/p.pdf")
+    assert "error" not in out
+    assert (real / "p.pdf").read_bytes() == PDF_BYTES
 
 
 # --------------------------------------------------------------------------- #
