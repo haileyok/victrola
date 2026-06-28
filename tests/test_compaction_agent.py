@@ -387,6 +387,46 @@ async def test_empty_text_block_not_persisted_alongside_tool_use(tmp_path):
     await store.close()
 
 
+def test_openai_convert_handles_mixed_tool_result_and_text():
+    """A user turn mixing a leftover text block with a tool_result (as orphan
+    repair can produce) must still emit a `role:tool` message, not stringify the
+    tool_result into user content (which would break OpenAI tool-call pairing)."""
+    from src.agent.agent import OpenAICompatibleClient
+
+    client = OpenAICompatibleClient(
+        api_key="x", model_name="m", endpoint="http://localhost"
+    )
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "t1", "name": "execute_code", "input": {}},
+                {"type": "tool_use", "id": "t2", "name": "execute_code", "input": {}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "[orphaned tool result removed]"},
+                {"type": "tool_result", "tool_use_id": "t2", "content": "ok"},
+            ],
+        },
+    ]
+    out = client._convert_messages(messages, system="sys")
+
+    tool_msgs = [m for m in out if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0]["tool_call_id"] == "t2"
+    assert tool_msgs[0]["content"] == "ok"
+    # The leftover text becomes a user message; no tool_result is smuggled into
+    # a stringified user message.
+    assert not any("tool_use_id" in str(m.get("content", "")) for m in out)
+    assert any(
+        m.get("role") == "user" and m.get("content") == "[orphaned tool result removed]"
+        for m in out
+    )
+
+
 async def test_title_generation_ignores_tool_result_user_rows(tmp_path):
     """tool_result rows (sender=user, no text) must not satisfy the auto-title
     user-message threshold."""

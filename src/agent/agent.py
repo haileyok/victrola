@@ -344,8 +344,13 @@ class OpenAICompatibleClient(AgentClient):
                         oai_msg["tool_calls"] = tool_calls
                     result.append(oai_msg)
                 elif role == "user":
-                    if content and content[0].get("type") == "tool_result":
-                        for block in content:
+                    tool_result_blocks = [
+                        b
+                        for b in content
+                        if isinstance(b, dict) and b.get("type") == "tool_result"
+                    ]
+                    if tool_result_blocks:
+                        for block in tool_result_blocks:
                             raw = block.get("content", "")
                             if isinstance(raw, list):
                                 # image content blocks — convert to OAI format
@@ -383,6 +388,20 @@ class OpenAICompatibleClient(AgentClient):
                                         "content": raw,
                                     }
                                 )
+                        # Non-tool_result blocks mixed into the same user turn
+                        # (e.g. text left behind when orphan repair neutralizes
+                        # one of several tool_results) become a trailing user
+                        # message, so a tool_result is never stringified into
+                        # user content and tool-call pairing stays intact.
+                        leftover = " ".join(
+                            b.get("text", "")
+                            for b in content
+                            if isinstance(b, dict)
+                            and b.get("type") == "text"
+                            and b.get("text")
+                        ).strip()
+                        if leftover:
+                            result.append({"role": "user", "content": leftover})
                     else:
                         # User message with multi-block content (e.g. images
                         # pasted alongside text). Convert any Anthropic image
