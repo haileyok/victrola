@@ -222,7 +222,9 @@ async def test_signal_compaction_persisted(signal_bot):
     checkpoint = await store.chat.get_compaction_checkpoint(session_id)
     assert checkpoint is not None
     assert checkpoint["summary"] == "test summary"
-    assert checkpoint["compacted_up_to_msg_id"] > 0
+    # 5 seeded rows (ids 1..5) then the new user row (id 6, dropped on load);
+    # split_idx=3 maps to msg_ids[2] == id 3, so the checkpoint must land there.
+    assert checkpoint["compacted_up_to_msg_id"] == 3
 
 
 async def test_signal_close_stops_polling(signal_bot):

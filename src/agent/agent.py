@@ -557,13 +557,18 @@ def _persistable_message(message: dict[str, Any]) -> dict[str, Any]:
             and block.get("type") == "tool_result"
             and isinstance(block.get("content"), list)
         ):
-            new_content.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": block.get("tool_use_id"),
-                    "content": "[tool result: image omitted from history]",
-                }
-            )
+            # Keep any text blocks; replace only the image block(s) with a
+            # placeholder so we preserve the tool's textual output but never
+            # store the base64 blob.
+            inner: list[Any] = []
+            for b in block["content"]:
+                if isinstance(b, dict) and b.get("type") == "image":
+                    inner.append(
+                        {"type": "text", "text": "[image omitted from history]"}
+                    )
+                else:
+                    inner.append(b)
+            new_content.append({**block, "content": inner})
             changed = True
         else:
             new_content.append(block)
@@ -1099,12 +1104,10 @@ class Agent:
         else:
             effective_system_prompt = self._system_prompt or ""
 
-        # Repair any dangling tool_use/tool_result pairs left by a previously
-        # interrupted turn BEFORE compaction, so the summary and checkpoint are
-        # built from an API-valid, semantically explicit history.
-        self._repair_conversation(conversation)
-
-        # compact the conversation if it's gotten huge
+        # compact the conversation if it's gotten huge. Repair runs inside the
+        # iteration loop (before each API call), not here: mutating the
+        # conversation before compaction would desync the caller's parallel
+        # msg_ids list and make on_compact checkpoint the wrong store row.
         try:
             await self._maybe_compact(conversation, on_compact=on_compact)
         except Exception:
@@ -1158,7 +1161,10 @@ class Agent:
 
             for block in resp.content:
                 if isinstance(block, AgentTextBlock):
-                    assistant_content.append({"type": "text", "text": block.text})
+                    # Skip empty text blocks: the APIs reject a zero-length text
+                    # block, and persisting one would 400 the next reload.
+                    if block.text:
+                        assistant_content.append({"type": "text", "text": block.text})
                     text_response += block.text
                 elif isinstance(block, AgentToolUseBlock):  # type: ignore
                     assistant_content.append(

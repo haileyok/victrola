@@ -285,10 +285,15 @@ def test_persistable_message_strips_tool_result_images():
         ],
     }
     out = _persistable_message(msg)
-    assert out["content"][0]["content"] == "[tool result: image omitted from history]"
+    inner = out["content"][0]["content"]
+    # Text is preserved; only the image block is replaced.
+    assert isinstance(inner, list)
+    assert {"type": "text", "text": "here"} in inner
+    assert {"type": "text", "text": "[image omitted from history]"} in inner
+    assert "A" * 5000 not in json.dumps(out)
     assert out["content"][0]["tool_use_id"] == "t1"
     # Original message is not mutated.
-    assert isinstance(msg["content"][0]["content"], list)
+    assert any(b.get("type") == "image" for b in msg["content"][0]["content"])
 
     # String tool results pass through unchanged (same object).
     str_msg = {
@@ -337,6 +342,47 @@ async def test_on_message_persists_image_tool_result_without_base64(tmp_path):
     blob = json.dumps(tool_result_turn)
     assert "B" * 5000 not in blob
     assert "image omitted" in blob
+
+    await store.close()
+
+
+async def test_empty_text_block_not_persisted_alongside_tool_use(tmp_path):
+    """An empty text block returned next to a tool_use is filtered out so the
+    persisted/reloaded assistant turn never carries a zero-length text block."""
+    from src.agent.agent import AgentResponse, AgentTextBlock, AgentToolUseBlock
+
+    agent, store, mock_client = await _make_agent_with_stub_client(tmp_path)
+    mock_client.complete = AsyncMock(
+        side_effect=[
+            AgentResponse(
+                content=[
+                    AgentTextBlock(text=""),
+                    AgentToolUseBlock(id="t1", name="execute_code", input={"code": "1"}),
+                ],
+                stop_reason="tool_use",
+                usage={},
+            ),
+            AgentResponse(
+                content=[AgentTextBlock(text="done")], stop_reason="end_turn", usage={}
+            ),
+        ]
+    )
+    agent._handle_tool_call = AsyncMock(return_value={"output": "ok"})
+
+    received = []
+
+    async def on_message(message):
+        received.append(message)
+
+    await agent.chat("go", conversation=[], on_message=on_message)
+
+    # First persisted turn is the assistant tool_use turn — tool_use only.
+    assert [b["type"] for b in received[0]["content"]] == ["tool_use"]
+    # No empty text block anywhere in the persisted turns.
+    for m in received:
+        for b in m["content"]:
+            if b.get("type") == "text":
+                assert b["text"] != ""
 
     await store.close()
 
