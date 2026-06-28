@@ -535,6 +535,44 @@ def _format_tool_result(result: dict[str, Any]) -> str | list[dict[str, Any]]:
     return content_str
 
 
+def _persistable_message(message: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of a message safe to persist long-term.
+
+    Image data in tool results is replaced with a short text placeholder so we
+    never write large base64 blobs to the store. Images are ephemeral — they
+    only matter for the turn that produced them — and text tool results are
+    already capped at MAX_TOOL_RESULT_LENGTH, so this only affects the image
+    path (the only unbounded payload). The in-memory conversation keeps the
+    full content for the current turn; only the persisted copy is bounded.
+    """
+    content = message.get("content")
+    if not isinstance(content, list):
+        return message
+
+    new_content: list[Any] = []
+    changed = False
+    for block in content:
+        if (
+            isinstance(block, dict)
+            and block.get("type") == "tool_result"
+            and isinstance(block.get("content"), list)
+        ):
+            new_content.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block.get("tool_use_id"),
+                    "content": "[tool result: image omitted from history]",
+                }
+            )
+            changed = True
+        else:
+            new_content.append(block)
+
+    if not changed:
+        return message
+    return {**message, "content": new_content}
+
+
 def _timestamp_prefix(message: str) -> str:
     """prefix user mesages with a formatted timestamp for agent awareness"""
     now = datetime.now(timezone.utc)
@@ -678,6 +716,18 @@ class Agent:
         messages with tool_use blocks that lack matching tool_result responses.
         The Anthropic API rejects these. This method patches them up.
         """
+        # Drop assistant messages that carry no content blocks. Some providers
+        # can return an empty turn, and the APIs reject an empty content list.
+        conversation[:] = [
+            m
+            for m in conversation
+            if not (
+                m.get("role") == "assistant"
+                and isinstance(m.get("content"), list)
+                and len(m["content"]) == 0
+            )
+        ]
+
         i = 0
         while i < len(conversation):
             msg = conversation[i]
@@ -843,6 +893,28 @@ class Agent:
                 split_idx = i
                 break
 
+        # Don't split a tool_use/tool_result pair: if `recent` would start with
+        # a tool_result message, move the boundary back so the matching
+        # assistant tool_use stays in `recent` too. Otherwise we'd summarize the
+        # tool_use while _repair_conversation later neutralizes the orphaned
+        # result, dropping the tool's actual output from the model's context.
+        def _starts_with_tool_result(idx: int) -> bool:
+            if idx >= len(conversation):
+                return False
+            m = conversation[idx]
+            c = m.get("content")
+            return (
+                m.get("role") == "user"
+                and isinstance(c, list)
+                and any(
+                    isinstance(b, dict) and b.get("type") == "tool_result"
+                    for b in c
+                )
+            )
+
+        while split_idx > 0 and _starts_with_tool_result(split_idx):
+            split_idx -= 1
+
         older = conversation[:split_idx]
         recent = conversation[split_idx:]
         if not older:
@@ -995,7 +1067,7 @@ class Agent:
             if on_message is None:
                 return
             try:
-                await on_message(message)
+                await on_message(_persistable_message(message))
             except Exception:
                 logger.exception("on_message callback failed; continuing")
         # refresh the system prompt before each operator turn so that newly
@@ -1026,6 +1098,11 @@ class Agent:
             )
         else:
             effective_system_prompt = self._system_prompt or ""
+
+        # Repair any dangling tool_use/tool_result pairs left by a previously
+        # interrupted turn BEFORE compaction, so the summary and checkpoint are
+        # built from an API-valid, semantically explicit history.
+        self._repair_conversation(conversation)
 
         # compact the conversation if it's gotten huge
         try:
@@ -1100,7 +1177,10 @@ class Agent:
             if resp.reasoning_content:
                 assistant_msg["reasoning_content"] = resp.reasoning_content
             conversation.append(assistant_msg)
-            await _persist(assistant_msg)
+            # Skip persisting an empty assistant turn (no text or tool_use
+            # blocks): the APIs reject an empty content list on reload.
+            if assistant_content:
+                await _persist(assistant_msg)
 
             # find any tool calls that we need to handle
             if resp.stop_reason == "tool_use":
@@ -1178,12 +1258,12 @@ class Agent:
             if isinstance(block, AgentTextBlock):
                 text_response += block.text
         if text_response:
-            await _persist(
-                {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": text_response}],
-                }
-            )
+            final_msg = {
+                "role": "assistant",
+                "content": [{"type": "text", "text": text_response}],
+            }
+            conversation.append(final_msg)
+            await _persist(final_msg)
         if total_usage:
             logger.info("Chat total usage: %s", total_usage)
         return text_response

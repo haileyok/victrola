@@ -163,26 +163,43 @@ async def maybe_generate_session_title(
     # count user messages and sample the first couple of turns
     msgs = await store.chat.list_messages(session_id=session_id, limit=20)
     records = msgs.get("messages", [])
-    user_count = sum(1 for r in records if r.get("sender") == "user")
+
+    def _display_text(record: dict[str, Any]) -> str:
+        """Extract the human-readable text from a stored message record.
+
+        Structured tool turns (tool_use / tool_result blocks) carry no text
+        and return "" so they don't count as conversation turns or pollute the
+        title transcript with blank lines.
+        """
+        content = record.get("content", "")
+        try:
+            parsed = json.loads(content)
+            text = parsed.get("content", "")
+        except (json.JSONDecodeError, TypeError):
+            return str(content)
+        if isinstance(text, list):
+            return " ".join(
+                b.get("text", "")
+                for b in text
+                if isinstance(b, dict) and b.get("type") == "text"
+            )
+        return str(text)
+
+    # Count only human user turns. Tool-result turns are also stored with
+    # sender="user" but carry no displayable text, so they must not inflate the
+    # auto-title threshold.
+    user_count = sum(
+        1 for r in records if r.get("sender") == "user" and _display_text(r).strip()
+    )
     if user_count < TITLE_GEN_MIN_USER_MESSAGES:
         return None
 
     transcript_parts: list[str] = []
     for r in records[:10]:
-        sender = r.get("sender", "?")
-        content = r.get("content", "")
-        try:
-            parsed = json.loads(content)
-            text = parsed.get("content", "")
-            if isinstance(text, list):
-                text = " ".join(
-                    b.get("text", "") for b in text
-                    if isinstance(b, dict) and b.get("type") == "text"
-                )
-        except (json.JSONDecodeError, TypeError):
-            text = str(content)
-        text = str(text)[:500]
-        transcript_parts.append(f"{sender}: {text}")
+        text = _display_text(r).strip()
+        if not text:
+            continue
+        transcript_parts.append(f"{r.get('sender', '?')}: {text[:500]}")
     transcript = "\n".join(transcript_parts)
 
     try:
