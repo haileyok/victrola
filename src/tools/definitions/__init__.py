@@ -8,3 +8,4 @@ import src.tools.definitions.summarize  # noqa: F401
 import src.tools.definitions.system  # noqa: F401
 import src.tools.definitions.web  # noqa: F401
 import src.tools.definitions.web_pdf  # noqa: F401
+import src.tools.definitions.workspace_upload  # noqa: F401
