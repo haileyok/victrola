@@ -69,6 +69,15 @@ def _scan_workspace_or_raise(workspace: str) -> None:
     A single ``scandir`` traversal collects everything; the symlink check
     short-circuits. Cost is O(workspace entries) per execution — negligible for
     the expected small workspaces.
+
+    Threat model: the agent runs in Deno (``--deny-run/ffi/sys``, no net on the
+    main path) and cannot create symlinks, escaping hardlinks, or special files,
+    so it cannot defeat this guard. Two residuals are out of scope because they
+    require an *active local attacker* racing the filesystem (not the agent):
+    an intermediate path component swapped to a symlink between this scan and
+    Deno's open, and the same race on the web delete path. A single permitted
+    run can also exceed the quota before the next run is refused (availability,
+    not an escape).
     """
     from src.config import CONFIG
 
