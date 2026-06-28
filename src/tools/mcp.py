@@ -419,6 +419,8 @@ class MCPManager:
         self._connections: dict[str, MCPConnection] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._health_task: asyncio.Task | None = None
+        # Per-server OAuth paste-back state, keyed by server name.
+        self._oauth_state: dict[str, dict[str, Any]] = {}
 
     def _get_lock(self, name: str) -> asyncio.Lock:
         """Get or create a per-server lock for serializing operations."""
@@ -999,39 +1001,6 @@ class MCPManager:
         self._servers[config.name] = config
         return f"MCP server '{config.name}' created."
 
-    async def update_server(self, name: str, **fields: Any) -> str:
-        """Update an existing server config. Reconnects if connection-affecting fields change."""
-        async with self._get_lock(name):
-            config = self._servers.get(name)
-            if config is None:
-                return f"MCP server '{name}' not found."
-
-            connection_fields = {"transport", "url", "command", "args", "auth_token_secret", "env_secrets"}
-            needs_reconnect = False
-            was_connected = name in self._connections
-
-            for key, value in fields.items():
-                if value is None:
-                    continue
-                if key in connection_fields and getattr(config, key) != value:
-                    needs_reconnect = True
-                if hasattr(config, key):
-                    setattr(config, key, value)
-
-            await self._persist_server(name)
-
-            if needs_reconnect and was_connected:
-                # disconnect old connection, then reconnect under the same lock
-                if name in self._connections:
-                    await self._disconnect_server_impl(name)
-                try:
-                    await self._connect_server_impl(name)
-                except Exception as e:
-                    logger.warning("Failed to reconnect MCP server '%s': %s", name, e)
-                    return f"MCP server '{name}' updated, but reconnection failed: {e}"
-
-        return f"MCP server '{name}' updated."
-
     async def delete_server(self, name: str) -> str:
         """Delete a server — disconnects and unregisters tools first."""
         async with self._get_lock(name):
@@ -1170,9 +1139,7 @@ class MCPManager:
             scope=None,
         )
 
-        # Per-server state for the paste-back flow
-        if not hasattr(self, "_oauth_state"):
-            self._oauth_state: dict[str, dict[str, Any]] = {}
+        # Reset only this server's paste-back state; never the shared container.
         self._oauth_state[server_name] = {
             "consent_url": None,
             "pending_callback": None,
@@ -1247,7 +1214,7 @@ class MCPManager:
 
     def get_oauth_consent_url(self, name: str) -> str | None:
         """Return the OAuth consent URL if one was generated during connect."""
-        state = getattr(self, "_oauth_state", {}).get(name, {})
+        state = self._oauth_state.get(name, {})
         return state.get("consent_url")
 
     async def submit_oauth_callback(self, name: str, redirect_url: str) -> str:
@@ -1256,7 +1223,7 @@ class MCPManager:
         This resolves the pending callback handler and allows the OAuth flow
         to continue.
         """
-        state = getattr(self, "_oauth_state", {}).get(name, {})
+        state = self._oauth_state.get(name, {})
         future = state.get("pending_callback")
         if future is None or future.done():
             return f"No pending OAuth callback for '{name}'. Start a connection first."
