@@ -33,6 +33,12 @@ httpx_logger.setLevel(logging.WARNING)
 httpcore_logger = logging.getLogger("httpcore")
 httpcore_logger.setLevel(logging.WARNING)
 
+# The MCP SDK logs OAuth flow failures at ERROR even when they're expected
+# during background reconnect (expired tokens, silent refresh impossible).
+# Our own code already logs these failures; the SDK log is redundant noise.
+mcp_oauth_logger = logging.getLogger("mcp.client.auth.oauth2")
+mcp_oauth_logger.setLevel(logging.WARNING)
+
 
 SHARED_OPTIONS: list[Callable[..., Callable[..., object]]] = [
     click.option("--model-api"),

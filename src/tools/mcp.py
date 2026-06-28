@@ -84,6 +84,33 @@ def _task_is_cancelling() -> bool:
     return task is not None and task.cancelling() > 0
 
 
+async def _is_expected_teardown_error(exc: BaseException) -> bool:
+    """True for transport teardown errors that are benign and expected.
+
+    During background disconnect (``_spawn_detached_disconnect``) or shutdown,
+    the transport's ``aclose()`` may raise:
+    - CancelledError (task cancelled during teardown)
+    - RuntimeError about a cancel scope not belonging to the current task
+      (anyio task group closed from a different task than created it — happens
+      when a detached background task closes a streamable_http/stdio transport)
+    - An ExceptionGroup/BaseExceptionGroup wrapping either of the above
+    - RuntimeError("Interactive OAuth authorization required …") re-raised
+      when the stack is torn down after a failed background reconnect
+
+    None of these indicate a real problem — the connection is being discarded
+    regardless. They should be logged at DEBUG, not WARNING.
+    """
+    if isinstance(exc, asyncio.CancelledError):
+        return True
+    if isinstance(exc, RuntimeError):
+        msg = str(exc)
+        if "cancel scope" in msg or "Interactive OAuth authorization required" in msg:
+            return True
+    if isinstance(exc, BaseExceptionGroup):
+        return all(_is_expected_teardown_error(e) for e in exc.exceptions)
+    return False
+
+
 async def _detached_disconnect(conn: "MCPConnection") -> None:
     """Close a connection in the background with a best-effort timeout.
 
@@ -294,12 +321,15 @@ class MCPConnection:
         if self._stack is not None:
             try:
                 await self._stack.aclose()
-            except (Exception, asyncio.CancelledError, BaseExceptionGroup):
+            except (Exception, asyncio.CancelledError, BaseExceptionGroup) as exc:
                 # aclose() surfaces an anyio BaseExceptionGroup (a BaseException,
                 # not an Exception) wrapping a CancelledError on transport
                 # teardown. This is the sole origin of that group; swallowing it
                 # here keeps it off every path that awaits disconnect().
-                logger.warning("Error closing MCP connection", exc_info=True)
+                if _is_expected_teardown_error(exc):
+                    logger.debug("Expected teardown error closing MCP connection", exc_info=True)
+                else:
+                    logger.warning("Error closing MCP connection", exc_info=True)
             self._stack = None
 
     async def list_tools(self) -> list[Any]:
