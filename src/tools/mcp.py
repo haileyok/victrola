@@ -419,6 +419,7 @@ class MCPManager:
         self._connections: dict[str, MCPConnection] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._health_task: asyncio.Task | None = None
+        self._background_tasks: set[asyncio.Task] = set()
         # Per-server OAuth paste-back state, keyed by server name.
         self._oauth_state: dict[str, dict[str, Any]] = {}
 
@@ -427,6 +428,18 @@ class MCPManager:
         if name not in self._locks:
             self._locks[name] = asyncio.Lock()
         return self._locks[name]
+
+    def _spawn_detached_disconnect(self, conn: "MCPConnection") -> None:
+        """Close a connection in the background, holding a strong task ref.
+
+        The event loop keeps only a weak reference to a bare create_task, so an
+        unreferenced cleanup task can be garbage-collected before it closes the
+        transport — leaking a stdio child process and its pipes. Retain the task
+        until it finishes, then drop it.
+        """
+        task = asyncio.create_task(_detached_disconnect(conn))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     # -- loading from store --
 
@@ -535,7 +548,7 @@ class MCPManager:
         conn = self._connections.pop(name, None)
         if conn:
             conn._session = None
-            asyncio.create_task(_detached_disconnect(conn))
+            self._spawn_detached_disconnect(conn)
 
     async def disconnect_server(self, name: str) -> None:
         """Disconnect a server and unregister its tools."""
@@ -654,7 +667,7 @@ class MCPManager:
                 conn = self._connections.pop(name, None)
                 if conn:
                     conn._session = None
-                    asyncio.create_task(_detached_disconnect(conn))
+                    self._spawn_detached_disconnect(conn)
                 return False
             except Exception as e:
                 logger.warning("Auto-reconnect failed for '%s': %s", name, e)
@@ -673,7 +686,7 @@ class MCPManager:
         conn = self._connections.pop(name, None)
         if conn:
             conn._session = None
-            asyncio.create_task(_detached_disconnect(conn))
+            self._spawn_detached_disconnect(conn)
         await self._connect_server_impl(name, auto=True)
 
     async def connect_all(self) -> None:
@@ -938,7 +951,7 @@ class MCPManager:
                     conn = self._connections.pop(server_name, None)
                     if conn:
                         conn._session = None
-                        asyncio.create_task(_detached_disconnect(conn))
+                        self._spawn_detached_disconnect(conn)
                     return {"error": f"MCP tool call failed: {e}. Auto-reconnect timed out."}
                 except Exception as reconnect_err:
                     if server_name in self._connections:
