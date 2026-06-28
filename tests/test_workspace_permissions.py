@@ -629,3 +629,21 @@ def test_web_list_rejects_hardlink_metadata(workspace_app, temp_workspace, tmp_p
 
     resp = workspace_app.get("/api/workspace", params={"path": "hl"})
     assert resp.status_code == 404
+
+
+async def test_agent_cannot_permanently_brick_via_chmod(
+    executor_with_workspace, temp_workspace
+):
+    """The agent has workspace write scope and can chmod its own dirs 000; the
+    pre-run scan must restore owner access and auto-heal rather than fail every
+    future run (and the dir becomes scannable/deletable again)."""
+    sub = temp_workspace / "locked"
+    sub.mkdir()
+    (sub / "f.txt").write_text("x")
+    os.chmod(sub, 0o000)
+    try:
+        result = await executor_with_workspace.execute_code("output({ ok: true });")
+        assert result["success"] is True, f"scan should auto-heal, got: {result}"
+        assert os.access(sub, os.R_OK | os.X_OK), "owner access should be restored"
+    finally:
+        os.chmod(sub, 0o700)  # ensure tmp cleanup can remove the tree

@@ -83,6 +83,21 @@ def _scan_workspace_or_raise(workspace: str) -> None:
             it = os.scandir(current)
         except FileNotFoundError:
             continue
+        except PermissionError:
+            # The agent has write scope and can chmod its OWN workspace dirs
+            # unreadable (e.g. Deno.chmod(dir, 0)), which would otherwise
+            # permanently fail the guard and brick all future runs. Since we own
+            # the dir, restore owner access and retry once. If we don't own it
+            # (chmod fails), fall through to fail-closed — a planted dir owned by
+            # another user can't be forced open to hide a symlink/hardlink.
+            try:
+                os.chmod(current, os.stat(current).st_mode | 0o700)
+                it = os.scandir(current)
+            except OSError as exc:
+                raise WorkspaceError(
+                    f"cannot scan the workspace ({exc}); refusing to run code "
+                    "that writes to the workspace."
+                )
         except OSError as exc:
             # Fail closed: if we can't enumerate a directory we can't prove it's
             # symlink/hardlink free, so don't grant write access.
