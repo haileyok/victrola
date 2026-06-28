@@ -34,7 +34,10 @@ class Config(BaseSettings):
     """directory the agent can read and write files to (Deno-scoped)"""
 
     workspace_max_size_mb: int = 1024
-    """soft limit for workspace size in MB; logged as a warning when exceeded"""
+    """workspace size limit in MB. Enforced as a pre-run refusal: the agent
+    cannot start code that writes to the workspace while it is already over
+    this size (and the web UI surfaces it). Not a live per-write cap — a single
+    permitted run can still write past the limit before the next run is blocked."""
 
     # display
     context_limit: int = 200_000

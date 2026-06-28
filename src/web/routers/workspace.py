@@ -62,7 +62,10 @@ def _compute_workspace_size(workspace: Path) -> int:
             if f.is_symlink():
                 continue
             if f.is_file():
-                total += f.stat().st_size
+                st = f.stat()
+                if st.st_nlink > 1:  # skip possible hardlink-to-outside
+                    continue
+                total += st.st_size
         except OSError:
             continue
     return total
@@ -97,6 +100,9 @@ async def list_workspace(
             continue
         try:
             st = entry.stat()
+            # Skip multi-linked regular files (possible hardlink to outside).
+            if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+                continue
             entries.append(
                 {
                     "name": entry.name,
@@ -151,6 +157,11 @@ async def read_workspace_file(
     with os.fdopen(fd, "rb") as f:
         st = os.fstat(f.fileno())
         if not stat.S_ISREG(st.st_mode):
+            raise HTTPException(404, "File not found")
+        # Refuse multi-linked files: a hardlink can share an inode with a file
+        # outside the workspace, so reading it could disclose out-of-workspace
+        # content (O_NOFOLLOW does not catch hardlinks).
+        if st.st_nlink > 1:
             raise HTTPException(404, "File not found")
         # Read at most MAX_READ_SIZE + 1 bytes so a file growing between checks
         # can't blow up memory; truncate the response if it's larger.

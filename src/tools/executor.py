@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -49,24 +50,32 @@ class WorkspaceError(Exception):
 def _scan_workspace_or_raise(workspace: str) -> None:
     """Pre-execution guard run before Deno is granted workspace access.
 
-    1. Reject ANY symlink in the workspace tree. Deno authorizes a read/write
-       *through* a symlink based on the link's location, not its target, so a
-       symlink inside the workspace turns ``--allow-write=<workspace>`` into a
-       write-outside primitive. The agent itself cannot create symlinks (Deno
-       denies it), but the workspace is persistent and an operator, a restored
-       backup, another local process, or a future upload path could plant one —
-       so we refuse to run rather than follow it.
-    2. Refuse when the workspace already exceeds the configured size quota,
-       bounding unbounded disk growth from agent writes.
+    Deno authorizes a read/write *through* a link based on the link's location,
+    not its target, so a link inside the workspace pointing/refers outside turns
+    ``--allow-write=<workspace>`` into a write-outside primitive. The agent
+    cannot create escaping links (Deno denies symlink creation and won't link or
+    rename across the permission boundary), but the workspace is persistent and
+    an operator, a restored backup, another local process, or a future upload
+    path could plant one — so we refuse to run rather than follow it.
 
-    A single ``scandir`` traversal does both; the symlink check short-circuits.
-    Cost is O(workspace entries) per execution — negligible for the expected
-    small workspaces.
+    1. Reject ANY symlink in the workspace tree.
+    2. Reject any hardlink whose inode also has a link OUTSIDE the workspace
+       (writing it would modify out-of-workspace data). Hardlinks that live
+       entirely inside the workspace are allowed.
+    3. Refuse to START a run while the workspace already exceeds the configured
+       size quota. This is a next-run backpressure check, not a per-run cap: a
+       single permitted run can still write past the limit.
+
+    A single ``scandir`` traversal collects everything; the symlink check
+    short-circuits. Cost is O(workspace entries) per execution — negligible for
+    the expected small workspaces.
     """
     from src.config import CONFIG
 
     max_bytes = CONFIG.workspace_max_size_mb * 1024 * 1024
     total = 0
+    # inode (st_dev, st_ino) -> [fs-wide link count, links seen inside workspace]
+    multilink: dict[tuple[int, int], list[int]] = {}
     stack = [workspace]
     while stack:
         current = stack.pop()
@@ -85,11 +94,28 @@ def _scan_workspace_or_raise(workspace: str) -> None:
                     )
                 if entry.is_dir(follow_symlinks=False):
                     stack.append(entry.path)
-                else:
-                    try:
-                        total += entry.stat(follow_symlinks=False).st_size
-                    except OSError:
-                        continue
+                    continue
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+                    rec = multilink.get((st.st_dev, st.st_ino))
+                    if rec is None:
+                        multilink[(st.st_dev, st.st_ino)] = [st.st_nlink, 1]
+                    else:
+                        rec[1] += 1
+                total += st.st_size
+
+    for fs_links, inside_links in multilink.values():
+        if fs_links > inside_links:
+            raise WorkspaceError(
+                "workspace contains a hardlink to a file outside the workspace; "
+                "writes through it would escape the sandbox's scoped write "
+                "permission. Remove it (e.g. via the workspace file browser) "
+                "and retry."
+            )
+
     if max_bytes and total > max_bytes:
         raise WorkspaceError(
             f"workspace is over its size limit ({total} bytes > {max_bytes} "

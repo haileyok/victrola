@@ -539,3 +539,73 @@ def test_web_list_skips_symlinks(workspace_app, temp_workspace, tmp_path):
     names = [e["name"] for e in resp.json()["entries"]]
     assert "real.txt" in names
     assert "ln3" not in names
+
+
+# ---------------------------------------------------------------------------
+# Hardlink-escape regression tests
+#
+# A hardlink is a regular file (no symlink, O_NOFOLLOW doesn't help). If its
+# inode also has a link OUTSIDE the workspace, writing it modifies / reading it
+# discloses out-of-workspace data. The agent cannot create such a link (Deno
+# denies it), but a pre-existing one (operator/backup/other process) must be
+# rejected — symmetric with the symlink guard.
+# ---------------------------------------------------------------------------
+
+
+async def test_deno_refuses_run_with_external_hardlink(
+    executor_with_workspace, temp_workspace, tmp_path
+):
+    """A hardlink to an outside file blocks execution."""
+    outside = tmp_path / "hl_outside.txt"
+    outside.write_text("ORIGINAL")
+    os.link(outside, temp_workspace / "hl")  # hardlink into the workspace
+
+    result = await executor_with_workspace.execute_code(
+        'await Deno.writeTextFile(WORKSPACE + "/hl", "CLOBBERED");\noutput({ ok: true });'
+    )
+    assert result["success"] is False, f"expected refusal, got: {result}"
+    assert "hardlink" in result["error"].lower()
+    assert outside.read_text() == "ORIGINAL"
+
+
+async def test_deno_allows_internal_hardlink(executor_with_workspace, temp_workspace):
+    """A hardlink whose links are all INSIDE the workspace is fine — the guard
+    must not brick the agent on a self-created internal hardlink."""
+    (temp_workspace / "a.txt").write_text("data")
+    os.link(temp_workspace / "a.txt", temp_workspace / "b.txt")  # both inside
+
+    result = await executor_with_workspace.execute_code("output({ ok: true });")
+    assert result["success"] is True, f"internal hardlink should be allowed: {result}"
+
+
+async def test_deno_cannot_create_escaping_hardlink(
+    executor_with_workspace, temp_workspace, tmp_path
+):
+    """The agent itself cannot Deno.link an outside file into the workspace
+    (Deno denies read on the outside source) — locks in the runtime behavior."""
+    src = tmp_path / "link_src.txt"
+    src.write_text("x")
+    code = (
+        "try {\n"
+        f"  await Deno.link({json.dumps(str(src))}, WORKSPACE + \"/x\");\n"
+        "  output({ created: true });\n"
+        "} catch (e) {\n"
+        "  output({ created: false, error: e instanceof Error ? e.message : String(e) });\n"
+        "}"
+    )
+    result = await executor_with_workspace.execute_code(code)
+    assert result["success"], f"code should run, got: {result}"
+    assert result["output"]["created"] is False
+    err = result["output"]["error"].lower()
+    assert any(k in err for k in ("permission", "notcapable", "denied", "read access", "allow-read"))
+
+
+def test_web_read_rejects_hardlink(workspace_app, temp_workspace, tmp_path):
+    """The read endpoint refuses a multi-linked file (possible hardlink-out)."""
+    outside = tmp_path / "hl_secret.txt"
+    outside.write_text("SECRET")
+    os.link(outside, temp_workspace / "hl")
+
+    resp = workspace_app.get("/api/workspace/file", params={"path": "hl"})
+    assert resp.status_code == 404
+    assert outside.read_text() == "SECRET"
