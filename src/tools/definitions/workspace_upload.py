@@ -57,7 +57,8 @@ def _read_workspace_file(rel_path: str) -> tuple[bytes, str]:
         fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
         raise ValueError(f"cannot open {rel_path!r}: {exc}")
-    # Validate the fd before fdopen (fdopen on a dir raises IsADirectoryError).
+    # Validate the raw fd BEFORE handing it to fdopen (fdopen on a dir raises
+    # IsADirectoryError). We own fd here, so close it ourselves on any failure.
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
@@ -66,18 +67,17 @@ def _read_workspace_file(rel_path: str) -> tuple[bytes, str]:
             raise ValueError("refusing a multi-linked file (possible hardlink outside the workspace)")
         if st.st_size > MAX_UPLOAD_BYTES:
             raise ValueError(f"file exceeds {MAX_UPLOAD_BYTES} bytes")
-        with os.fdopen(fd, "rb") as f:  # takes ownership of fd, closes on exit
-            # Capped read: enforce the limit on the bytes actually read, in case
-            # the file grew after fstat.
-            data = f.read(MAX_UPLOAD_BYTES + 1)
-            if len(data) > MAX_UPLOAD_BYTES:
-                raise ValueError(f"file exceeds {MAX_UPLOAD_BYTES} bytes")
     except BaseException:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+        os.close(fd)
         raise
+    # Ownership transfers to the file object now; its context manager is the
+    # only thing that closes fd (so a later raise can't double-close it).
+    with os.fdopen(fd, "rb") as f:
+        # Capped read: enforce the limit on the bytes actually read, in case the
+        # file grew after fstat.
+        data = f.read(MAX_UPLOAD_BYTES + 1)
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise ValueError(f"file exceeds {MAX_UPLOAD_BYTES} bytes")
     return data, target.name
 
 
