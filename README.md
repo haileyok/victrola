@@ -16,7 +16,7 @@ Victrola supports Anthropic, OpenAI, or any OpenAPI compatible endpoint like Oll
 
 The agent interacts with its tools via a single `execute_code` primitive. It writes TypeScript that calls `tools.namespace.method(...)`, which round-trips to Python handlers. This lets the agent chain multiple tool calls in one turn instead of paying a round trip per call (see [Cloudflare's "code mode" post](https://blog.cloudflare.com/code-mode/) for the rationale).
 
-Deno runs with the bare minimum of permissions: no filesystem writes, no network, no env access, 256 MB V8 heap, 60 s timeout, max 25 inner tool calls per execution. All actual network / storage work happens in Python.
+Deno runs with the bare minimum of permissions: scoped filesystem access limited to the workspace directory, no network, no env access (except explicitly declared secrets in custom tools), 256 MB V8 heap, 60 s timeout, max 25 inner tool calls per execution. All actual network / storage work happens in Python.
 
 ## Built-in tools
 
@@ -117,12 +117,34 @@ Embeddings are generated via a local Ollama instance using `nomic-embed-text` (7
 
 Memory entries can also be managed through the web interface at `/memory`, which provides browse, search, create, edit, and delete alongside the `memory.*` agent tools.
 
+## Workspace
+
+The agent has a persistent workspace directory (default: `data/workspace/`) where it can read and write files using Deno's native file APIs. This lets the agent build multi-file projects, create shared libraries, test code before deploying it as a custom tool, and generate artifacts.
+
+The workspace path is injected into every `execute_code` and custom tool block as the `WORKSPACE` TypeScript constant. The agent uses `Deno.writeTextFile`, `Deno.readTextFile`, `Deno.readDir`, and other native APIs to interact with files. Modules in the workspace can be dynamically imported via `await import(WORKSPACE + "/lib/parsers.ts")`.
+
+### Security model
+
+- Workspace access is scoped via Deno's `--allow-write=<workspace>` and `--allow-read=<workspace>` — the agent cannot write outside this directory
+- Symlink creation is not permitted
+- The workspace is visible to the operator via the web interface at `/workspace`
+- No npm packages — the agent vendors TypeScript source manually if needed
+- A configurable size limit monitors for disk exhaustion (soft limit with warning)
+
+### Configuration
+
+```env
+WORKSPACE_DIR=data/workspace
+WORKSPACE_MAX_SIZE_MB=1024
+```
+
 ## Storage
 
 Everything persistent lives under `./data/`:
 - `store.db` — SQLite: memory entries (+ FTS5 index + embeddings), chat sessions + messages, custom tool definitions, scheduled tasks, namespaced records
 - `secrets.json` — named secrets (injected as env vars into custom tool Deno processes)
 - `schedules.json.migrated` — renamed after one-time migration to SQLite (kept as backup)
+- `workspace/` — agent file storage (read/write scoped to Deno sandbox)
 
 Nothing leaves this directory unless you wire a tool to send it somewhere.
 

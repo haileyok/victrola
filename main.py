@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Literal
 
 import click
@@ -104,6 +105,15 @@ def build_services(
     )
 
     return executor, agent
+
+
+def _ensure_workspace_dir() -> None:
+    """Create the workspace directory if it doesn't exist.
+
+    Called early so the agent never sees a missing workspace.
+    """
+    workspace_path = Path(CONFIG.workspace_dir)
+    workspace_path.mkdir(parents=True, exist_ok=True)
 
 
 def _wire_scheduler(executor: ToolExecutor, agent: Agent) -> None:
@@ -408,6 +418,7 @@ def main(
     async def run():
         try:
             await executor.initialize()
+            _ensure_workspace_dir()
             _wire_scheduler(executor, agent)
             await _init_memory(executor, agent)
 
@@ -455,6 +466,7 @@ def chat(
     async def run():
         try:
             await executor.initialize()
+            _ensure_workspace_dir()
             await _init_memory(executor, agent)
 
             async def _refresh_prompt() -> str:
@@ -506,6 +518,7 @@ def serve(
     async def run():
         try:
             await executor.initialize()
+            _ensure_workspace_dir()
             _wire_scheduler(executor, agent)
             await _init_memory(executor, agent)
 

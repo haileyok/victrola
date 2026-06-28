@@ -1,11 +1,12 @@
 import { Outlet, Link, useLocation } from "react-router-dom";
-import { MessageSquare, Wrench, Key, Clock, FileText, Plug, Brain } from "lucide-react";
+import { MessageSquare, Wrench, Key, Clock, FileText, Plug, Brain, FolderOpen } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const navItems = [
   { to: "/sessions", label: "Sessions", icon: MessageSquare },
   { to: "/tools", label: "Tools", icon: Wrench },
   { to: "/mcp", label: "MCP", icon: Plug },
+  { to: "/workspace", label: "Workspace", icon: FolderOpen },
   { to: "/secrets", label: "Secrets", icon: Key },
   { to: "/schedules", label: "Schedules", icon: Clock },
   { to: "/system-prompt", label: "Prompt", icon: FileText },

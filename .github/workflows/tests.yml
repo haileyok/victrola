@@ -17,6 +17,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The workspace permission tests spawn real `deno` subprocesses, so the
+      # runner needs Deno on PATH. Pinned to the version the suite is validated
+      # against locally; bump deliberately after re-validating.
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v1.42.4
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip

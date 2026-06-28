@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,148 @@ MAX_TOOL_CALLS = 25  # max number of tool calls per execution
 MAX_OUTPUT_SIZE = 1_000_000  # max total output size in bytes
 MAX_EXECUTION_TIME = 60.0  # total wall-clock timeout in seconds
 DENO_MEMORY_LIMIT_MB = 256  # v8 heap limit
+
+
+def _resolve_workspace() -> str:
+    """Resolve the workspace directory to an absolute path.
+
+    Rejects paths containing commas — Deno's --allow-read/--allow-write flags
+    use commas as path separators, so a comma in the workspace path would
+    silently grant access to extra directories.
+    """
+    from src.config import CONFIG
+
+    workspace = str(Path(CONFIG.workspace_dir).resolve())
+    if "," in workspace:
+        raise ValueError(
+            f"workspace_dir must not contain commas (Deno treats commas as "
+            f"path separators in permission flags): {workspace!r}"
+        )
+    return workspace
+
+
+class WorkspaceError(Exception):
+    """The workspace is in an unsafe state to grant to Deno.
+
+    Raised when the workspace contains a symlink (which could escape the
+    scoped write permission) or is already over its size quota.
+    """
+
+
+def _scan_workspace_or_raise(workspace: str) -> None:
+    """Pre-execution guard run before Deno is granted workspace access.
+
+    Deno authorizes a read/write *through* a link based on the link's location,
+    not its target, so a link inside the workspace pointing/refers outside turns
+    ``--allow-write=<workspace>`` into a write-outside primitive. The agent
+    cannot create escaping links (Deno denies symlink creation and won't link or
+    rename across the permission boundary), but the workspace is persistent and
+    an operator, a restored backup, another local process, or a future upload
+    path could plant one — so we refuse to run rather than follow it.
+
+    1. Reject ANY symlink in the workspace tree.
+    2. Reject any hardlink whose inode also has a link OUTSIDE the workspace
+       (writing it would modify out-of-workspace data). Hardlinks that live
+       entirely inside the workspace are allowed.
+    3. Refuse to START a run while the workspace already exceeds the configured
+       size quota. This is a next-run backpressure check, not a per-run cap: a
+       single permitted run can still write past the limit.
+
+    A single ``scandir`` traversal collects everything; the symlink check
+    short-circuits. Cost is O(workspace entries) per execution — negligible for
+    the expected small workspaces.
+
+    Threat model: the agent runs in Deno (``--deny-run/ffi/sys``, no net on the
+    main path) and cannot create symlinks, escaping hardlinks, or special files,
+    so it cannot defeat this guard. Two residuals are out of scope because they
+    require an *active local attacker* racing the filesystem (not the agent):
+    an intermediate path component swapped to a symlink between this scan and
+    Deno's open, and the same race on the web delete path. A single permitted
+    run can also exceed the quota before the next run is refused (availability,
+    not an escape).
+    """
+    from src.config import CONFIG
+
+    max_bytes = CONFIG.workspace_max_size_mb * 1024 * 1024
+    total = 0
+    # inode (st_dev, st_ino) -> [fs-wide link count, links seen inside workspace]
+    multilink: dict[tuple[int, int], list[int]] = {}
+    stack = [workspace]
+    while stack:
+        current = stack.pop()
+        try:
+            it = os.scandir(current)
+        except FileNotFoundError:
+            continue
+        except PermissionError:
+            # The agent has write scope and can chmod its OWN workspace dirs
+            # unreadable (e.g. Deno.chmod(dir, 0)), which would otherwise
+            # permanently fail the guard and brick all future runs. Since we own
+            # the dir, restore owner access and retry once. If we don't own it
+            # (chmod fails), fall through to fail-closed — a planted dir owned by
+            # another user can't be forced open to hide a symlink/hardlink.
+            try:
+                os.chmod(current, os.stat(current).st_mode | 0o700)
+                it = os.scandir(current)
+            except OSError as exc:
+                raise WorkspaceError(
+                    f"cannot scan the workspace ({exc}); refusing to run code "
+                    "that writes to the workspace."
+                )
+        except OSError as exc:
+            # Fail closed: if we can't enumerate a directory we can't prove it's
+            # symlink/hardlink free, so don't grant write access.
+            raise WorkspaceError(
+                f"cannot scan the workspace ({exc}); refusing to run code that "
+                "writes to the workspace."
+            )
+        with it:
+            for entry in it:
+                if entry.is_symlink():
+                    raise WorkspaceError(
+                        f"workspace contains a symlink ({entry.path!r}); "
+                        "symlinks can escape the sandbox's scoped write "
+                        "permission and are not permitted. Remove it (e.g. via "
+                        "the workspace file browser) and retry."
+                    )
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(entry.path)
+                    continue
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(st.st_mode):
+                    # FIFOs/sockets/device nodes are not supported workspace
+                    # artifacts and could be a planted DoS/escape vector.
+                    raise WorkspaceError(
+                        f"workspace contains a special file ({entry.path!r}); "
+                        "only regular files and directories are supported. "
+                        "Remove it and retry."
+                    )
+                if st.st_nlink > 1:
+                    rec = multilink.get((st.st_dev, st.st_ino))
+                    if rec is None:
+                        multilink[(st.st_dev, st.st_ino)] = [st.st_nlink, 1]
+                    else:
+                        rec[1] += 1
+                total += st.st_size
+
+    for fs_links, inside_links in multilink.values():
+        if fs_links > inside_links:
+            raise WorkspaceError(
+                "workspace contains a hardlink to a file outside the workspace; "
+                "writes through it would escape the sandbox's scoped write "
+                "permission. Remove it (e.g. via the workspace file browser) "
+                "and retry."
+            )
+
+    if max_bytes and total > max_bytes:
+        raise WorkspaceError(
+            f"workspace is over its size limit ({total} bytes > {max_bytes} "
+            f"bytes / {CONFIG.workspace_max_size_mb} MB). Free space before "
+            "running code that writes to the workspace."
+        )
 
 
 class ToolExecutor:
@@ -205,11 +348,14 @@ class ToolExecutor:
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".ts", delete=False, dir=DENO_DIR
         ) as f:
+            workspace_json = json.dumps(_resolve_workspace())
             # start by adding all the imports that we need...
             full_code = f"""
 import {{ output, debug }} from "./runtime.ts";
 import * as tools from "./{stub_name}";
 export {{ tools }};
+
+const WORKSPACE = {workspace_json};
 
 {code}
 """
@@ -218,6 +364,8 @@ export {{ tools }};
 
         try:
             return await self._run_deno(temp_path)
+        except WorkspaceError as e:
+            return {"success": False, "error": str(e), "debug": []}
         finally:
             os.unlink(temp_path)
             os.unlink(stub_path)
@@ -242,12 +390,14 @@ export {{ tools }};
         stub_name = os.path.basename(stub_path)
 
         params_json = json.dumps(params)
+        workspace_json = json.dumps(_resolve_workspace())
         full_code = f"""
 import {{ output, debug }} from "./runtime.ts";
 import * as tools from "./{stub_name}";
 export {{ tools }};
 
 const params = {params_json};
+const WORKSPACE = {workspace_json};
 
 // --- tool code ---
 {code}
@@ -265,6 +415,8 @@ const params = {params_json};
                 allow_net=allow_net,
                 env=env or {},
             )
+        except WorkspaceError as e:
+            return {"success": False, "error": str(e), "debug": []}
         finally:
             os.unlink(temp_path)
             os.unlink(stub_path)
@@ -308,6 +460,7 @@ import {{ output, debug }} from "./runtime.ts";
                 allow_net=allow_net,
                 env=env or {},
                 allow_tool_calls=False,
+                allow_workspace=False,
             )
         finally:
             os.unlink(temp_path)
@@ -357,11 +510,21 @@ import {{ output, debug }} from "./runtime.ts";
         # spawn a subprocess that executes deno with minimal permissions. explicit deny flags
         # ensure these can't be escalated via dynamic imports or permission prompts.
         deno_read_path = str(DENO_DIR)
+        if "," in deno_read_path:
+            raise ValueError(
+                f"DENO_DIR must not contain commas (Deno permission separator): {deno_read_path!r}"
+            )
+        workspace = _resolve_workspace()
+        # Refuse to run if the workspace contains a symlink (write-scope escape)
+        # or is over quota, before granting Deno --allow-write to it.
+        _scan_workspace_or_raise(workspace)
+        read_paths = [deno_read_path, workspace]
+
         process = await asyncio.create_subprocess_exec(
             "deno",
             "run",
-            f"--allow-read={deno_read_path}",
-            "--deny-write",
+            f"--allow-read={','.join(read_paths)}",
+            f"--allow-write={workspace}",
             "--deny-net",
             "--deny-run",
             "--deny-env",
@@ -386,21 +549,47 @@ import {{ output, debug }} from "./runtime.ts";
         allow_net: bool = False,
         env: dict[str, str] | None = None,
         allow_tool_calls: bool = True,
+        allow_workspace: bool = True,
     ) -> dict[str, Any]:
-        """Run deno with configurable permissions for custom tools."""
+        """Run deno with configurable permissions for custom tools.
+
+        When ``allow_workspace`` is True (default, custom tools path), scoped
+        workspace read/write access is granted. When False (condition code
+        path), writes remain fully denied — condition scripts are side-effect
+        free by design.
+        """
 
         deno_read_path = str(DENO_DIR)
+        if "," in deno_read_path:
+            raise ValueError(
+                f"DENO_DIR must not contain commas (Deno permission separator): {deno_read_path!r}"
+            )
 
-        args = [
-            "deno",
-            "run",
-            f"--allow-read={deno_read_path}",
-            "--deny-write",
-            "--deny-run",
-            "--deny-ffi",
-            "--deny-sys",
-            "--no-prompt",
-        ]
+        if allow_workspace:
+            workspace = _resolve_workspace()
+            # Same pre-execution guard as _run_deno before granting write scope.
+            _scan_workspace_or_raise(workspace)
+            args = [
+                "deno",
+                "run",
+                f"--allow-read={deno_read_path},{workspace}",
+                f"--allow-write={workspace}",
+                "--deny-run",
+                "--deny-ffi",
+                "--deny-sys",
+                "--no-prompt",
+            ]
+        else:
+            args = [
+                "deno",
+                "run",
+                f"--allow-read={deno_read_path}",
+                "--deny-write",
+                "--deny-run",
+                "--deny-ffi",
+                "--deny-sys",
+                "--no-prompt",
+            ]
 
         if allow_net:
             # Allow outbound fetch() but NOT remote module loading —

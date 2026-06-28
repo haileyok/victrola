@@ -151,3 +151,26 @@ export interface MemorySearchResult {
 export interface MemorySearchResponse {
   results: MemorySearchResult[];
 }
+
+// -- workspace --
+
+export interface WorkspaceEntry {
+  name: string;
+  type: "file" | "directory";
+  size: number | null;
+  modified: string;
+}
+
+export interface WorkspaceListing {
+  path: string;
+  entries: WorkspaceEntry[];
+  total_size_bytes: number;
+  max_size_bytes: number;
+}
+
+export interface WorkspaceFile {
+  path: string;
+  content: string;
+  size: number;
+  modified: string;
+}
