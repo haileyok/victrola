@@ -386,15 +386,15 @@ class MCPOAuthTokenStorage:
         if self._store.documents is None:
             raise RuntimeError("DocumentStore is not initialized")
         content = json.dumps(tokens.model_dump())
+        from src.store.store import StoreNotFound
+
         try:
             await self._store.documents.update(self._rkey, content)
-        except Exception:
-            from src.store.store import StoreNotFound
-
-            try:
-                await self._store.documents.create(self._rkey, content)
-            except Exception:
-                logger.warning("Failed to store OAuth tokens for '%s'", self._server_name, exc_info=True)
+        except StoreNotFound:
+            # First write for this server — the document doesn't exist yet.
+            # Any other update error is a real persistence failure and must
+            # propagate rather than be masked by a conflicting create.
+            await self._store.documents.create(self._rkey, content)
 
     async def get_client_info(self) -> Any:
         return None
