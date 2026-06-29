@@ -454,6 +454,37 @@ class MCPOAuthTokenStorage:
         except StoreNotFound:
             await self._store.documents.create(self._client_rkey, content)
 
+    async def clear_stale_client_info(self) -> bool:
+        """Drop a stored client registration whose scope lacks ``offline_access``.
+
+        The SDK reuses a stored client registration instead of re-registering,
+        and Fastmail rejects an authorization whose scope isn't a subset of the
+        client's registered scopes. A client registered before the
+        ``offline_access`` fix (PR #55) has no ``offline_access`` in its scope,
+        so a later interactive re-auth that now requests ``offline_access``
+        fails with ``invalid_scope``. Dropping the stale registration makes the
+        SDK re-register under the corrected scope.
+
+        Only call this on an interactive connect: a background reconnect can't
+        complete a new authorization, so dropping the client would only make
+        things worse. Returns True if a stale client was dropped.
+        """
+        if self._store.documents is None:
+            return False
+        client_info = await self.get_client_info()
+        if client_info is None:
+            return False
+        scope = getattr(client_info, "scope", None)
+        # A null scope can't be inferred either way — leave it. Only drop when
+        # the server explicitly registered a scope that omits offline_access.
+        if scope and "offline_access" not in scope.split():
+            try:
+                await self._store.documents.delete(self._client_rkey)
+            except Exception:
+                return False
+            return True
+        return False
+
 
 class MCPManager:
     """Manages all MCP servers — parallel to CustomToolManager."""
@@ -557,6 +588,17 @@ class MCPManager:
         # build OAuth provider if needed
         oauth_provider = None
         if config.auth_type == "oauth" and config.url:
+            # Interactive connect only: drop a client registration whose scope
+            # predates the offline_access fix so the SDK re-registers fresh
+            # under the corrected scope (otherwise Fastmail rejects the auth
+            # with invalid_scope). Background reconnect leaves it alone.
+            if not auto:
+                storage = MCPOAuthTokenStorage(self._store, name)
+                if await storage.clear_stale_client_info():
+                    logger.info(
+                        "Dropped stale OAuth client registration for '%s' "
+                        "(scope missing offline_access); re-registering", name
+                    )
             # Background reconnect (auto=True) never launches interactive OAuth:
             # silent token refresh only, else fail fast and quiet.
             oauth_provider = self._create_oauth_provider(
