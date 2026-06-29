@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from src.config import resolve_operator_tz
+
 # -- patterns --
 
 DURATION_PATTERN = re.compile(r"^(\d+[hms])+$")
@@ -91,31 +93,45 @@ class ScheduleConfig:
                 return from_time + self.interval
 
             case "daily":
-                next_t = from_time.replace(
+                # Absolute times are interpreted in the operator's local
+                # timezone, then converted to UTC for firing. Compute the next
+                # occurrence in naive wall-clock and localize at the end so the
+                # result stays correct across DST transitions.
+                tz = resolve_operator_tz()
+                local_naive = from_time.astimezone(tz).replace(tzinfo=None)
+                naive = local_naive.replace(
                     hour=self.hour, minute=self.minute, second=0, microsecond=0
                 )
-                if next_t <= from_time:
-                    next_t += timedelta(days=1)
-                return next_t
+                if naive <= local_naive:
+                    naive += timedelta(days=1)
+                return naive.replace(tzinfo=tz).astimezone(timezone.utc)
 
             case "weekly":
-                next_t = from_time.replace(
+                tz = resolve_operator_tz()
+                local_naive = from_time.astimezone(tz).replace(tzinfo=None)
+                naive = local_naive.replace(
                     hour=self.hour, minute=self.minute, second=0, microsecond=0
                 )
-                days_until = self.weekday - next_t.weekday()
-                if days_until < 0 or (days_until == 0 and next_t <= from_time):
+                days_until = self.weekday - naive.weekday()
+                if days_until < 0 or (days_until == 0 and naive <= local_naive):
                     days_until += 7
-                return next_t + timedelta(days=days_until)
+                target = naive + timedelta(days=days_until)
+                return target.replace(tzinfo=tz).astimezone(timezone.utc)
 
             case "cron":
                 try:
                     from croniter import croniter  # type: ignore[import-untyped]
-
-                    return croniter(self.cron_expr, from_time).get_next(datetime)  # type: ignore[return-value]
                 except ImportError:
                     raise RuntimeError(
                         "croniter package required for cron schedules: uv add croniter"
                     )
+                # Evaluate the cron expression in the operator's local timezone,
+                # then return UTC for firing.
+                tz = resolve_operator_tz()
+                local_next = croniter(
+                    self.cron_expr, from_time.astimezone(tz)
+                ).get_next(datetime)
+                return local_next.astimezone(timezone.utc)
 
             case _:
                 return from_time + timedelta(hours=1)

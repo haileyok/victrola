@@ -4,7 +4,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Literal
 
 import anthropic
@@ -12,6 +12,7 @@ import httpx
 from anthropic.types import TextBlock, ToolUseBlock
 
 from src.agent.prompt import build_system_prompt
+from src.config import resolve_operator_tz as _resolve_operator_tz
 from src.tools.executor import ToolExecutor
 
 logger = logging.getLogger(__name__)
@@ -598,8 +599,9 @@ def _persistable_message(message: dict[str, Any]) -> dict[str, Any]:
 
 
 def _timestamp_prefix(message: str) -> str:
-    """prefix user mesages with a formatted timestamp for agent awareness"""
-    now = datetime.now(timezone.utc)
+    """prefix user messages with a timestamp in the operator's local time so the
+    agent reasons about the current time correctly instead of assuming UTC"""
+    now = datetime.now(_resolve_operator_tz())
     ts = now.strftime("%a %b %d, %Y %I:%M%p %Z")
     return f"[{ts}] {message}"
 

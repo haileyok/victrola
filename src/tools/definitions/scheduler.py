@@ -1,6 +1,7 @@
 import json
 import logging
 
+from src.config import resolve_operator_tz
 from src.tools.registry import TOOL_REGISTRY, ToolContext, ToolParameter
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,9 @@ async def list_schedules(ctx: ToolContext) -> str:
                 if last.tzinfo is None:
                     last = last.replace(tzinfo=timezone.utc)
                 next_run = task.config.next_run(last)
-                next_str = next_run.strftime("%Y-%m-%d %H:%M UTC")
+                next_str = next_run.astimezone(resolve_operator_tz()).strftime(
+                    "%Y-%m-%d %H:%M %Z"
+                )
             else:
                 next_str = "pending"
         except Exception:
@@ -95,10 +98,13 @@ async def get_schedule(ctx: ToolContext, name: str) -> str:
 SCHEDULE_SYNTAX_HELP = """Supported schedule expressions:
 - Duration: `30m`, `2h`, `1h30m`, `90s` — fires every interval (min 1 minute)
 - Keywords: `hourly`, `daily`, `weekly`
-- Daily at time: `daily@9:00`, `daily@14:30` — 24h clock, UTC
+- Daily at time: `daily@9:00`, `daily@14:30` — 24h clock, in the operator's local timezone
 - Weekly on day: `weekly@monday`, `weekly@fri`
 - Weekly on day at time: `weekly@monday@9:00`
-- Cron: `cron:0 9 * * *` (if croniter installed)"""
+- Cron: `cron:0 9 * * *` (if croniter installed)
+
+Absolute times (daily@, weekly@…@, cron) are interpreted in the operator's local
+timezone — just use the wall-clock time they asked for. Durations are relative."""
 
 
 @TOOL_REGISTRY.tool(

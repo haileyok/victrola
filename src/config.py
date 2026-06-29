@@ -1,7 +1,13 @@
 from typing import Literal
 
+import logging
+from datetime import timezone, tzinfo
+from zoneinfo import ZoneInfo
+
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 class Config(BaseSettings):
@@ -42,6 +48,11 @@ class Config(BaseSettings):
     # display
     context_limit: int = 200_000
     """approximate context window of the main model; used for the web UI context bar"""
+
+    operator_timezone: str = "UTC"
+    """IANA timezone for the operator (e.g. 'America/Los_Angeles'). Used to stamp
+    each user message with the operator's local time so the agent reasons about
+    'what time is it' correctly. Falls back to UTC if the name is invalid."""
 
     # discord bot chat
     discord_sessions_channel: str = "victrola-sessions"
@@ -122,3 +133,18 @@ class Config(BaseSettings):
 
 
 CONFIG = Config()
+
+
+def resolve_operator_tz() -> tzinfo:
+    """Resolve the operator's configured timezone, falling back to UTC.
+
+    Shared by the message-timestamp prefix and the scheduler so both speak the
+    operator's local time. A bad OPERATOR_TIMEZONE (typo, or a missing system tz
+    database) must not break message handling or scheduling — we log and use UTC.
+    """
+    name = CONFIG.operator_timezone or "UTC"
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        logger.warning("Invalid OPERATOR_TIMEZONE %r; falling back to UTC", name)
+        return timezone.utc
