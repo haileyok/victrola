@@ -43,6 +43,11 @@ class Config(BaseSettings):
     context_limit: int = 200_000
     """approximate context window of the main model; used for the web UI context bar"""
 
+    operator_timezone: str = "UTC"
+    """IANA timezone for the operator (e.g. 'America/Los_Angeles'). Used to stamp
+    each user message with the operator's local time so the agent reasons about
+    'what time is it' correctly. Falls back to UTC if the name is invalid."""
+
     # discord bot chat
     discord_sessions_channel: str = "victrola-sessions"
     """name of the text channel the Discord bot watches for chat sessions"""

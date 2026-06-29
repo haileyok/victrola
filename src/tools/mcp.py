@@ -369,6 +369,7 @@ class MCPOAuthTokenStorage:
         self._store = store
         self._server_name = server_name
         self._rkey = f"mcptoken:{server_name}"
+        self._client_rkey = f"mcpclient:{server_name}"
 
     async def get_tokens(self) -> Any:
         from mcp.shared.auth import OAuthToken
@@ -397,10 +398,31 @@ class MCPOAuthTokenStorage:
             await self._store.documents.create(self._rkey, content)
 
     async def get_client_info(self) -> Any:
-        return None
+        from mcp.shared.auth import OAuthClientInformationFull
+
+        if self._store.documents is None:
+            return None
+        try:
+            doc = await self._store.documents.get(self._client_rkey)
+            data = json.loads(doc["content"])
+            return OAuthClientInformationFull.model_validate(data)
+        except Exception:
+            return None
 
     async def set_client_info(self, client_info: Any) -> None:
-        pass  # We don't persist client info — it's regenerated each time
+        # Persist the dynamically-registered OAuth client so refresh and
+        # reconnect reuse the same client_id. Without this the SDK re-registers
+        # a new client every time, invalidating the saved refresh token (it was
+        # issued to the old client) and forcing a full re-auth.
+        if self._store.documents is None:
+            raise RuntimeError("DocumentStore is not initialized")
+        content = json.dumps(client_info.model_dump(mode="json"))
+        from src.store.store import StoreNotFound
+
+        try:
+            await self._store.documents.update(self._client_rkey, content)
+        except StoreNotFound:
+            await self._store.documents.create(self._client_rkey, content)
 
 
 class MCPManager:
@@ -1105,13 +1127,15 @@ class MCPManager:
         if config is None:
             return f"MCP server '{name}' not found."
 
-        rkey = f"mcptoken:{name}"
         if self._store.documents is None:
             raise RuntimeError("DocumentStore is not initialized")
-        try:
-            await self._store.documents.delete(rkey)
-        except Exception:
-            pass  # not found is fine
+        # Clear both the tokens and the persisted client registration so a
+        # manual re-authorize starts from a clean slate.
+        for rkey in (f"mcptoken:{name}", f"mcpclient:{name}"):
+            try:
+                await self._store.documents.delete(rkey)
+            except Exception:
+                pass  # not found is fine
         return f"OAuth tokens cleared for '{name}'."
 
     # -- internals --

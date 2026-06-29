@@ -4,8 +4,9 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 import anthropic
 import httpx
@@ -535,9 +536,28 @@ def _format_tool_result(result: dict[str, Any]) -> str | list[dict[str, Any]]:
     return content_str
 
 
+def _resolve_operator_tz() -> tzinfo:
+    """Resolve the operator's configured timezone, falling back to UTC.
+
+    A bad OPERATOR_TIMEZONE (typo, or missing system tz database) must not break
+    message handling — we log once and use UTC.
+    """
+    from src.config import CONFIG
+
+    name = CONFIG.operator_timezone or "UTC"
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        logger.warning(
+            "Invalid OPERATOR_TIMEZONE %r; falling back to UTC", name
+        )
+        return timezone.utc
+
+
 def _timestamp_prefix(message: str) -> str:
-    """prefix user mesages with a formatted timestamp for agent awareness"""
-    now = datetime.now(timezone.utc)
+    """prefix user messages with a timestamp in the operator's local time so the
+    agent reasons about the current time correctly instead of assuming UTC"""
+    now = datetime.now(_resolve_operator_tz())
     ts = now.strftime("%a %b %d, %Y %I:%M%p %Z")
     return f"[{ts}] {message}"
 
