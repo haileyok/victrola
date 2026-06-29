@@ -84,7 +84,7 @@ def _task_is_cancelling() -> bool:
     return task is not None and task.cancelling() > 0
 
 
-async def _is_expected_teardown_error(exc: BaseException) -> bool:
+def _is_expected_teardown_error(exc: BaseException) -> bool:
     """True for transport teardown errors that are benign and expected.
 
     During background disconnect (``_spawn_detached_disconnect``) or shutdown,
@@ -1193,6 +1193,12 @@ class MCPManager:
         """
         from mcp.client.auth import OAuthClientProvider
         from mcp.shared.auth import OAuthClientMetadata
+
+        from src.tools.mcp_oauth_patches import apply_mcp_oauth_patches
+
+        # Install SDK OAuth shims (offline_access scope request + refresh on a
+        # reloaded token) before any provider runs an auth flow. Idempotent.
+        apply_mcp_oauth_patches()
 
         storage = MCPOAuthTokenStorage(self._store, server_name)
 
