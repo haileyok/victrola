@@ -4,15 +4,15 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, tzinfo
+from datetime import datetime
 from typing import Any, Literal
-from zoneinfo import ZoneInfo
 
 import anthropic
 import httpx
 from anthropic.types import TextBlock, ToolUseBlock
 
 from src.agent.prompt import build_system_prompt
+from src.config import resolve_operator_tz as _resolve_operator_tz
 from src.tools.executor import ToolExecutor
 
 logger = logging.getLogger(__name__)
@@ -534,24 +534,6 @@ def _format_tool_result(result: dict[str, Any]) -> str | list[dict[str, Any]]:
     if len(content_str) > MAX_TOOL_RESULT_LENGTH:
         content_str = content_str[:MAX_TOOL_RESULT_LENGTH] + "\n... (truncated)"
     return content_str
-
-
-def _resolve_operator_tz() -> tzinfo:
-    """Resolve the operator's configured timezone, falling back to UTC.
-
-    A bad OPERATOR_TIMEZONE (typo, or missing system tz database) must not break
-    message handling — we log once and use UTC.
-    """
-    from src.config import CONFIG
-
-    name = CONFIG.operator_timezone or "UTC"
-    try:
-        return ZoneInfo(name)
-    except Exception:
-        logger.warning(
-            "Invalid OPERATOR_TIMEZONE %r; falling back to UTC", name
-        )
-        return timezone.utc
 
 
 def _timestamp_prefix(message: str) -> str:

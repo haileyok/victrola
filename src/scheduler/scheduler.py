@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from src.config import resolve_operator_tz
 from src.scheduler.schedule import ScheduleConfig, parse_schedule
 
 if TYPE_CHECKING:
@@ -253,7 +254,8 @@ class Scheduler:
         self._tasks[task.name] = task
 
         next_run = task.config.next_run(datetime.now(timezone.utc))
-        msg = f"Schedule '{task.name}' created ({task.config}). Next run: {next_run.strftime('%Y-%m-%d %H:%M UTC')}."
+        next_local = next_run.astimezone(resolve_operator_tz())
+        msg = f"Schedule '{task.name}' created ({task.config}). Next run: {next_local.strftime('%Y-%m-%d %H:%M %Z')}."
         if task.condition_code is not None and not task.approved:
             msg += " Schedule has condition code — pending operator approval before it will fire."
         return msg
