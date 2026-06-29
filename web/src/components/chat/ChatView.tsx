@@ -65,10 +65,14 @@ export function ChatView() {
     if (!id) return;
     try {
       const data = await api.listMessages(id, 100);
-      const chatItems: ChatItem[] = data.messages.map((m) => {
-        const { role, content } = parseMessage(m);
-        return { type: "message" as const, key: `msg-${m.id}`, role, content };
-      });
+      const chatItems: ChatItem[] = data.messages
+        .map((m) => {
+          const { role, content } = parseMessage(m);
+          return { type: "message" as const, key: `msg-${m.id}`, role, content };
+        })
+        // Structured turns persist tool_use / tool_result blocks that carry no
+        // displayable text; skip them so history shows only real messages.
+        .filter((item) => item.content.trim() !== "");
       setItems(chatItems);
     } catch (e) {
       console.error("Failed to load messages:", e);

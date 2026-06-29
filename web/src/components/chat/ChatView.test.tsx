@@ -60,6 +60,45 @@ describe("ChatView", () => {
     await waitFor(() => expect(screen.getByText(/Send a message to start chatting/)).toBeInTheDocument());
   });
 
+  it("filters out structured tool turns that carry no displayable text", async () => {
+    api.listMessages.mockResolvedValue({
+      messages: [
+        { id: 1, sender: "user", content: JSON.stringify({ role: "user", content: "do a thing" }) },
+        {
+          id: 2,
+          sender: "assistant",
+          content: JSON.stringify({
+            role: "assistant",
+            content: [{ type: "tool_use", id: "t1", name: "execute_code", input: { code: "x" } }],
+          }),
+        },
+        {
+          id: 3,
+          sender: "user",
+          content: JSON.stringify({
+            role: "user",
+            content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }],
+          }),
+        },
+        {
+          id: 4,
+          sender: "assistant",
+          content: JSON.stringify({
+            role: "assistant",
+            content: [{ type: "text", text: "all done" }],
+          }),
+        },
+      ],
+      cursor: null,
+    });
+    renderChatView();
+    await waitFor(() => expect(screen.getByText("do a thing")).toBeInTheDocument());
+    expect(screen.getByText("all done")).toBeInTheDocument();
+    // The tool_use-only and tool_result turns render no empty bubbles.
+    const bubbles = screen.getAllByText(/do a thing|all done/);
+    expect(bubbles).toHaveLength(2);
+  });
+
   it("disables input and shows thinking state while responding", async () => {
     api.chat.mockReturnValue(new Promise(() => {}));
     renderChatView();

@@ -286,6 +286,12 @@ class SignalBot:
                             self._session_rkey, last_id, summary
                         )
 
+            # Persist each structured message (assistant turns and tool-result
+            # turns) as the agent produces it, so the agent's tool history
+            # survives across turns instead of only the final text reply.
+            async def on_message(message: dict[str, Any]) -> None:
+                await conv_manager.save_message(self._session_rkey, message)
+
             # Run agent with a typing indicator while it thinks
             typing_stop = asyncio.Event()
             typing_task = asyncio.create_task(self._typing_loop(typing_stop))
@@ -294,6 +300,7 @@ class SignalBot:
                     user_text,
                     conversation=messages,
                     on_compact=on_compact,
+                    on_message=on_message,
                     images=images or None,
                 )
             finally:
@@ -302,15 +309,10 @@ class SignalBot:
                     await typing_task
                 await self._stop_typing()
 
-            # Save assistant response
+            # The structured turn (assistant + tool-result messages) was
+            # persisted incrementally via on_message during agent.chat(), so
+            # here we only deliver the reply to the operator.
             if response:
-                await store.chat.create_message(
-                    session_id=self._session_rkey,
-                    sender="assistant",
-                    content=json.dumps(
-                        {"role": "assistant", "content": response}, default=str
-                    ),
-                )
                 await self._send_response(response)
             else:
                 await self._send_response("(empty response)")

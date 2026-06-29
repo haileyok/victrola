@@ -344,8 +344,13 @@ class OpenAICompatibleClient(AgentClient):
                         oai_msg["tool_calls"] = tool_calls
                     result.append(oai_msg)
                 elif role == "user":
-                    if content and content[0].get("type") == "tool_result":
-                        for block in content:
+                    tool_result_blocks = [
+                        b
+                        for b in content
+                        if isinstance(b, dict) and b.get("type") == "tool_result"
+                    ]
+                    if tool_result_blocks:
+                        for block in tool_result_blocks:
                             raw = block.get("content", "")
                             if isinstance(raw, list):
                                 # image content blocks — convert to OAI format
@@ -383,6 +388,20 @@ class OpenAICompatibleClient(AgentClient):
                                         "content": raw,
                                     }
                                 )
+                        # Non-tool_result blocks mixed into the same user turn
+                        # (e.g. text left behind when orphan repair neutralizes
+                        # one of several tool_results) become a trailing user
+                        # message, so a tool_result is never stringified into
+                        # user content and tool-call pairing stays intact.
+                        leftover = " ".join(
+                            b.get("text", "")
+                            for b in content
+                            if isinstance(b, dict)
+                            and b.get("type") == "text"
+                            and b.get("text")
+                        ).strip()
+                        if leftover:
+                            result.append({"role": "user", "content": leftover})
                     else:
                         # User message with multi-block content (e.g. images
                         # pasted alongside text). Convert any Anthropic image
@@ -535,6 +554,49 @@ def _format_tool_result(result: dict[str, Any]) -> str | list[dict[str, Any]]:
     return content_str
 
 
+def _persistable_message(message: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of a message safe to persist long-term.
+
+    Image data in tool results is replaced with a short text placeholder so we
+    never write large base64 blobs to the store. Images are ephemeral — they
+    only matter for the turn that produced them — and text tool results are
+    already capped at MAX_TOOL_RESULT_LENGTH, so this only affects the image
+    path (the only unbounded payload). The in-memory conversation keeps the
+    full content for the current turn; only the persisted copy is bounded.
+    """
+    content = message.get("content")
+    if not isinstance(content, list):
+        return message
+
+    new_content: list[Any] = []
+    changed = False
+    for block in content:
+        if (
+            isinstance(block, dict)
+            and block.get("type") == "tool_result"
+            and isinstance(block.get("content"), list)
+        ):
+            # Keep any text blocks; replace only the image block(s) with a
+            # placeholder so we preserve the tool's textual output but never
+            # store the base64 blob.
+            inner: list[Any] = []
+            for b in block["content"]:
+                if isinstance(b, dict) and b.get("type") == "image":
+                    inner.append(
+                        {"type": "text", "text": "[image omitted from history]"}
+                    )
+                else:
+                    inner.append(b)
+            new_content.append({**block, "content": inner})
+            changed = True
+        else:
+            new_content.append(block)
+
+    if not changed:
+        return message
+    return {**message, "content": new_content}
+
+
 def _timestamp_prefix(message: str) -> str:
     """prefix user mesages with a formatted timestamp for agent awareness"""
     now = datetime.now(timezone.utc)
@@ -678,6 +740,18 @@ class Agent:
         messages with tool_use blocks that lack matching tool_result responses.
         The Anthropic API rejects these. This method patches them up.
         """
+        # Drop assistant messages that carry no content blocks. Some providers
+        # can return an empty turn, and the APIs reject an empty content list.
+        conversation[:] = [
+            m
+            for m in conversation
+            if not (
+                m.get("role") == "assistant"
+                and isinstance(m.get("content"), list)
+                and len(m["content"]) == 0
+            )
+        ]
+
         i = 0
         while i < len(conversation):
             msg = conversation[i]
@@ -843,6 +917,28 @@ class Agent:
                 split_idx = i
                 break
 
+        # Don't split a tool_use/tool_result pair: if `recent` would start with
+        # a tool_result message, move the boundary back so the matching
+        # assistant tool_use stays in `recent` too. Otherwise we'd summarize the
+        # tool_use while _repair_conversation later neutralizes the orphaned
+        # result, dropping the tool's actual output from the model's context.
+        def _starts_with_tool_result(idx: int) -> bool:
+            if idx >= len(conversation):
+                return False
+            m = conversation[idx]
+            c = m.get("content")
+            return (
+                m.get("role") == "user"
+                and isinstance(c, list)
+                and any(
+                    isinstance(b, dict) and b.get("type") == "tool_result"
+                    for b in c
+                )
+            )
+
+        while split_idx > 0 and _starts_with_tool_result(split_idx):
+            split_idx -= 1
+
         older = conversation[:split_idx]
         recent = conversation[split_idx:]
         if not older:
@@ -928,6 +1024,7 @@ class Agent:
         conversation: list[dict[str, Any]],
         on_event: Callable[[AgentEvent], Awaitable[None]] | None = None,
         on_compact: Callable[[str, int], Awaitable[None]] | None = None,
+        on_message: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         images: list[dict[str, str]] | None = None,
     ) -> str:
         """Send a message and get a response, handling tool calls.
@@ -949,13 +1046,28 @@ class Agent:
         that were summarized. Callers use this to persist a compaction checkpoint
         to the store so the summary can be reused on reload instead of
         re-summarizing from scratch.
+
+        `on_message` is an optional callback invoked once for each message the
+        agent appends to the conversation during the turn — every assistant
+        message (including ones carrying only tool_use blocks) and every
+        tool-results message. Callers use it to persist the full structured
+        turn so the agent's tool history survives across turns, instead of only
+        the final text reply. The current user message is not re-emitted here;
+        callers persist it themselves before calling chat().
         """
 
         async def _emit(event: AgentEvent) -> None:
             if on_event is not None:
                 await on_event(event)
 
-        return await self._chat_impl(user_message, conversation, _emit, on_compact=on_compact, images=images)
+        return await self._chat_impl(
+            user_message,
+            conversation,
+            _emit,
+            on_compact=on_compact,
+            on_message=on_message,
+            images=images,
+        )
 
     async def _chat_impl(
         self,
@@ -963,10 +1075,25 @@ class Agent:
         conversation: list[dict[str, Any]],
         _emit: Callable[[AgentEvent], Awaitable[None]],
         on_compact: Callable[[str, int], Awaitable[None]] | None = None,
+        on_message: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         images: list[dict[str, str]] | None = None,
     ) -> str:
         """Inner chat loop. `conversation` is the caller-owned list that
         will be mutated in place. Do not call directly — go through `chat()`."""
+
+        async def _persist(message: dict[str, Any]) -> None:
+            """Hand a freshly-appended message to the on_message callback.
+
+            Serialization happens inside the callback, so later in-place
+            mutation of the conversation (trimming, repair) does not affect
+            what was persisted. Failures are logged but never abort the turn.
+            """
+            if on_message is None:
+                return
+            try:
+                await on_message(_persistable_message(message))
+            except Exception:
+                logger.exception("on_message callback failed; continuing")
         # refresh the system prompt before each operator turn so that newly
         # added secrets, approved custom tools, self-note edits, and skills
         # show up without restarting the harness.
@@ -996,7 +1123,10 @@ class Agent:
         else:
             effective_system_prompt = self._system_prompt or ""
 
-        # compact the conversation if it's gotten huge
+        # compact the conversation if it's gotten huge. Repair runs inside the
+        # iteration loop (before each API call), not here: mutating the
+        # conversation before compaction would desync the caller's parallel
+        # msg_ids list and make on_compact checkpoint the wrong store row.
         try:
             await self._maybe_compact(conversation, on_compact=on_compact)
         except Exception:
@@ -1050,7 +1180,10 @@ class Agent:
 
             for block in resp.content:
                 if isinstance(block, AgentTextBlock):
-                    assistant_content.append({"type": "text", "text": block.text})
+                    # Skip empty text blocks: the APIs reject a zero-length text
+                    # block, and persisting one would 400 the next reload.
+                    if block.text:
+                        assistant_content.append({"type": "text", "text": block.text})
                     text_response += block.text
                 elif isinstance(block, AgentToolUseBlock):  # type: ignore
                     assistant_content.append(
@@ -1069,6 +1202,10 @@ class Agent:
             if resp.reasoning_content:
                 assistant_msg["reasoning_content"] = resp.reasoning_content
             conversation.append(assistant_msg)
+            # Skip persisting an empty assistant turn (no text or tool_use
+            # blocks): the APIs reject an empty content list on reload.
+            if assistant_content:
+                await _persist(assistant_msg)
 
             # find any tool calls that we need to handle
             if resp.stop_reason == "tool_use":
@@ -1108,7 +1245,9 @@ class Agent:
                             }
                         )
 
-                conversation.append({"role": "user", "content": tool_results})
+                tool_results_msg = {"role": "user", "content": tool_results}
+                conversation.append(tool_results_msg)
+                await _persist(tool_results_msg)
             else:
                 # once there are no more tool calls, we proceed to the text response
                 if total_usage:
@@ -1143,6 +1282,13 @@ class Agent:
         for block in resp.content:
             if isinstance(block, AgentTextBlock):
                 text_response += block.text
+        if text_response:
+            final_msg = {
+                "role": "assistant",
+                "content": [{"type": "text", "text": text_response}],
+            }
+            conversation.append(final_msg)
+            await _persist(final_msg)
         if total_usage:
             logger.info("Chat total usage: %s", total_usage)
         return text_response
