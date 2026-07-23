@@ -1,0 +1,40 @@
+# Secrets — never enter the build context
+.env
+.env.*
+
+# Runtime data (SQLite, secrets.json, workspace, logs)
+data/
+victrola.log
+*.log
+
+# Python
+.venv/
+__pycache__/
+*.py[oc]
+*.egg-info/
+build/
+dist/
+wheels/
+
+# Frontend — built inside the image, don't ship stale artifacts
+web/node_modules/
+web/dist-tsconfig/
+web/*.tsbuildinfo
+# Stale committed build output — rebuilt fresh in Dockerfile Stage 1
+src/web/static/
+
+# Git
+.git/
+.gitignore
+
+# CI / docs not needed at runtime
+.github/
+docs/design-plans/
+docs/implementation-plans/
+docs/test-plans/
+
+# Worktrees
+.worktrees/
+
+# Test artifacts
+test_images.py

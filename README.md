@@ -28,6 +28,7 @@ Deno runs with the bare minimum of permissions: scoped filesystem access limited
 | `summarize` | `summarize` | Summarize text using the sub-agent model. |
 | `web` | search tools via [Exa](https://exa.ai) (requires `EXA_API_KEY`). |
 | `image` | `view_image` | Fetch an image URL and include it inline. |
+| `meet` | `create_link` | Create a standalone Google Meet link via the Google Meet REST API (requires `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` secrets). |
 | `custom_tools` | `create_custom_tool`, `call_tool`, etc. | Agent-written tools (see below). |
 | `system` | `get_tool_docs` | Fetch full parameter docs for any tool (typically MCP tools, which are listed in a compact catalog in the system prompt). |
 
@@ -191,6 +192,55 @@ git clone https://github.com/haileyok/victrola.git
 cd victrola
 uv sync --frozen
 ```
+
+## Docker (recommended for deployment)
+
+Victrola ships as a single Docker image published to `ghcr.io/haileyok/victrola`. The image bundles Python, Deno, Playwright Chromium, and the pre-built frontend — everything needed to run the full agent.
+
+### Quick start
+
+```bash
+# 1. Configure
+cp .env.example .env
+# Edit .env — at minimum set MODEL_API, MODEL_API_KEY, MODEL_NAME
+
+# 2. Pull and run
+docker compose up -d
+```
+
+The web interface is at `http://localhost:8000`.
+
+### How it works
+
+- **Image:** `ghcr.io/haileyok/victrola:latest` — built automatically by GitHub Actions on every push to `main` and on version tags (`v1.2.3` → `1.2.3`, `1.2`, `1`).
+- **docker-compose.yaml** pulls the published image (no local build needed), mounts a persistent volume at `/app/data` for SQLite/secrets/workspace, and exposes port 8000.
+- **Secrets** (Discord token, Google Meet OAuth, Exa API key, etc.) are managed via the web interface Secrets page — they're stored in `secrets.json` inside the data volume, not as environment variables.
+
+### Environment
+
+The Docker image sets sensible container defaults:
+- `WEB_HOST=0.0.0.0` (binds all interfaces so the port mapping works)
+- `WEB_PDF_CHROMIUM_NO_SANDBOX=1` (Chromium can't use its namespace sandbox as non-root in a container)
+
+Override anything else in your `.env` file — model config, Discord/Signal settings, embeddings endpoint, etc.
+
+### Optional external services
+
+These are not included in the compose file because they're deployment-specific. If you use them, run them alongside Victrola:
+
+- **Ollama** (embeddings for memory search / RAG recall): Point `EMBEDDING_ENDPOINT` at your Ollama instance. If Ollama isn't running, memory degrades gracefully to keyword-only search.
+- **signal-cli-rest-api** (Signal chat): Follow the [Signal setup](#signal-chat-optional) docs and point `SIGNAL_SERVICE` at it.
+
+### Building locally
+
+If you want to build the image yourself instead of pulling from ghcr.io:
+
+```bash
+docker build -t victrola .
+# Then reference `image: victrola` in docker-compose.yaml
+```
+
+The Dockerfile uses a multi-stage build: Stage 1 compiles the React frontend with Node, Stage 2 assembles the Python runtime with Deno and Playwright Chromium.
 
 ## Configuration
 
@@ -360,6 +410,37 @@ You can chat with the agent from Signal in addition to the web interface. Signal
 - Long responses are chunked into multiple messages at ~1900 chars.
 - Image attachments are supported (ephemeral — not persisted to the conversation store).
 - The agent's `notify.signal` and `notify.send` tools work independently of the chat loop, so you can send notifications even when the bot isn't running.
+
+## Google Meet links (optional)
+
+The agent can create standalone Google Meet links via `meet.create_link`. This uses the [Google Meet REST API](https://developers.google.com/workspace/meet/api/reference/rest/v2/spaces/create) (`spaces.create`) to generate a meeting space and return a `meeting_uri` like `https://meet.google.com/abc-mnop-xyz`. The link is standalone — it is not tied to a calendar event, so there is no duplication when the real event lives in Fastmail or another calendar.
+
+**Return value:** `{ success, meeting_uri, meeting_code, space_name }`. The `meeting_uri` is the full join URL; `meeting_code` is the short code (e.g. `abc-mnop-xyz`); `space_name` is Google's internal resource ID. Both `meeting_code` and `space_name` may be `null`.
+
+**One-time setup:**
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/) → create (or select) a project
+2. Enable the **Google Meet API** (APIs & Services → Library → search "Google Meet")
+3. APIs & Services → **OAuth consent screen** → configure as External, add your email as a test user
+4. APIs & Services → **Credentials** → Create Credentials → **OAuth client ID** (Application type: **Web application**). Add `https://developers.google.com/oauthplayground` as an authorized redirect URI.
+5. Obtain a **refresh token** with the `https://www.googleapis.com/auth/meetings.space.created` scope. The easiest way is the [OAuth Playground](https://developers.google.com/oauthplayground/):
+   - Click the gear icon (top right) → check "Use your own OAuth credentials" → paste your client ID and secret from step 4
+   - In the left panel, find "Google Meet API v2" → expand → check `meetings.space.created`
+   - Click "Authorize APIs" → grant consent → click "Exchange authorization code for tokens"
+   - Copy the `refresh_token` value
+6. In the victrola web interface → **Secrets** page, add three secrets:
+   - `GOOGLE_CLIENT_ID` — your OAuth client ID
+   - `GOOGLE_CLIENT_SECRET` — your OAuth client secret
+   - `GOOGLE_REFRESH_TOKEN` — the refresh token from step 5
+
+> **Note on token expiration:** If the OAuth consent screen is left in "Testing" status, Google refresh tokens expire after 7 days. For durable use, [publish the consent screen](https://support.google.com/cloud/answer/9110914) (requires verification if using sensitive scopes — but `meetings.space.created` is non-sensitive, so publishing is straightforward). If links stop working after a week, this is the likely cause.
+
+The agent can now call `meet.create_link` from `execute_code`. The optional `access_type` parameter controls who can join without knocking:
+- `open` (default) — anyone with the link can join without knocking
+- `trusted` — org members and invited users join without knocking; others must knock
+- `restricted` — only invited users join without knocking; everyone else must knock
+
+**Troubleshooting:** If the tool returns an OAuth error, the refresh token may have expired or been revoked. Re-authorize via the OAuth Playground (step 5) and update the `GOOGLE_REFRESH_TOKEN` secret.
 
 ## Compaction (optional)
 

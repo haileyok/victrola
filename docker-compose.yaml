@@ -1,0 +1,45 @@
+# docker-compose.yaml
+#
+# Victrola — fully dockerized.
+# The image is built and published to ghcr.io by the GitHub Actions workflow
+# (.github/workflows/docker-publish.yml). This compose file pulls the published
+# image from the registry so no local build is required for deployment.
+#
+# Usage:
+#   1. Copy .env.example to .env and fill in your config
+#   2. docker compose up -d
+#   3. Open http://localhost:8000
+#
+# Optional external services (not included):
+#   - Ollama: for embeddings (memory search / RAG recall). If unavailable,
+#     memory degrades gracefully to keyword-only search.
+#   - signal-cli-rest-api: for Signal chat integration.
+
+services:
+  victrola:
+    image: ghcr.io/haileyok/victrola:latest
+    container_name: victrola
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${WEB_PORT:-8000}:8000"
+    volumes:
+      # Persistent data: SQLite store, secrets.json, workspace, logs
+      - victrola-data:/app/data
+    # If you prefer a bind mount (edit data/ directly on the host) instead of
+    # a named volume, comment out the volume above and uncomment this:
+    #   - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/api/status"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    # The image sets WEB_HOST=0.0.0.0 and WEB_PDF_CHROMIUM_NO_SANDBOX=1 by
+    # default, so you only need to override model config + optional integrations
+    # in .env. Override the command if you want headless mode (no web UI):
+    #   command: ["uv", "run", "python", "main.py", "main"]
+
+volumes:
+  victrola-data:
