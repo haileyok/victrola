@@ -31,6 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         unzip \
         ca-certificates \
+        gosu \
         libnss3 \
         libnspr4 \
         libatk1.0-0 \
@@ -79,6 +80,10 @@ RUN useradd --create-home --shell /bin/bash victrola \
     && mkdir -p /app/data \
     && chown -R victrola:victrola /app
 
+# Entrypoint: fix data dir ownership on bind mounts, then drop to victrola user
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 # Persistent data: SQLite store, secrets.json, workspace, logs
 VOLUME ["/app/data"]
 
@@ -96,6 +101,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -sf http://localhost:8000/api/status || exit 1
 
-USER victrola
-
+# Runs as root; entrypoint chowns the data dir then drops to victrola via gosu
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["uv", "run", "python", "main.py", "serve"]
