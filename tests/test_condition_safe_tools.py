@@ -87,7 +87,7 @@ async def test_custom_tool_code_still_has_full_tool_access(executor, calls):
 
 def test_only_read_only_builtins_are_condition_safe():
     """Guard against accidentally exposing a side-effecting tool to conditions."""
-    assert TOOL_REGISTRY.condition_safe_tool_names() == {"bluesky.unread_count"}
+    assert TOOL_REGISTRY.condition_safe_tool_names() == {"bluesky.unread_count", "delve.unread_count"}
 
 
 # --- bluesky.unread_count ---------------------------------------------------

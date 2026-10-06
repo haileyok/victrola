@@ -17,6 +17,7 @@ import pytest
 
 from src.tools.definitions import atproto as ap
 from src.tools.definitions import bluesky as bs
+from src.tools.definitions import delve
 from src.tools.registry import TOOL_REGISTRY, ToolContext
 
 PDS = "https://pds.example.com"
@@ -28,7 +29,16 @@ def _iso(dt: datetime) -> str:
 
 
 class FakeAppView:
-    def __init__(self, count: int, seen_at: datetime | None, reasons: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        count: int,
+        seen_at: datetime | None,
+        reasons: list[str] | None = None,
+        prefix: str = "app.bsky.notification",
+        proxy: str = "did:web:api.bsky.app#bsky_appview",
+    ) -> None:
+        self.prefix = prefix
+        self.proxy = proxy
         # notifications[i] is i seconds after T0; listed newest first.
         # reasons[i] is notification i's reason (default: all replies).
         reasons = reasons or ["reply"] * count
@@ -66,8 +76,8 @@ class FakeAppView:
                 json={"did": "did:plc:agent", "handle": "agent.test", "accessJwt": "a", "refreshJwt": "r"},
             )
         assert request.headers.get("authorization") == "Bearer a"
-        assert request.headers.get("atproto-proxy") == "did:web:api.bsky.app#bsky_appview"
-        if path == "/xrpc/app.bsky.notification.listNotifications":
+        assert request.headers.get("atproto-proxy") == self.proxy
+        if path == f"/xrpc/{self.prefix}.listNotifications":
             self.list_calls += 1
             limit = int(request.url.params["limit"])
             start = int(request.url.params.get("cursor", "0"))
@@ -83,10 +93,10 @@ class FakeAppView:
             if self.seen_at is not None:
                 body["seenAt"] = _iso(self.seen_at)
             return httpx.Response(200, json=body)
-        if path == "/xrpc/app.bsky.notification.getUnreadCount":
+        if path == f"/xrpc/{self.prefix}.getUnreadCount":
             self.unread_count_calls += 1
             return httpx.Response(200, json={"count": self.unread_count()})
-        if path == "/xrpc/app.bsky.notification.updateSeen":
+        if path == f"/xrpc/{self.prefix}.updateSeen":
             if self.fail_update:
                 return httpx.Response(500, json={"error": "InternalServerError"})
             seen = json.loads(request.content)["seenAt"]
@@ -106,6 +116,7 @@ class FakeAppView:
 def _reset():
     ap._reset_session_cache()
     bs._reset_lock()
+    delve._reset_lock()
     yield
     ap._reset_session_cache()
 
@@ -294,3 +305,61 @@ async def test_unread_count_skips_scan_when_nothing_unread():
 async def test_unread_count_reasons_override():
     view = FakeAppView(len(MIXED), seen_at=T0 - timedelta(seconds=1), reasons=MIXED)
     assert await bs.unread_count(_ctx(view), reasons=["like", "follow"]) == {"count": 4}
+
+
+# --- delve.town ---------------------------------------------------------------
+
+DELVE_PREFIX = "town.delve.notification"
+DELVE_PROXY = "did:web:api.delve.town#bsky_appview"
+
+
+def _delve_view(count: int, seen_at: datetime | None, reasons: list[str] | None = None) -> FakeAppView:
+    # The fake asserts every call uses town.delve.* paths and the delve proxy;
+    # any app.bsky.* call would 404.
+    return FakeAppView(count, seen_at, reasons, prefix=DELVE_PREFIX, proxy=DELVE_PROXY)
+
+
+def test_delve_tools_registered():
+    assert TOOL_REGISTRY.get("delve.get_notifications") is not None
+    assert TOOL_REGISTRY.get("delve.unread_count").condition_safe is True
+
+
+async def test_delve_get_notifications_posts_only_and_marks_read():
+    view = _delve_view(len(MIXED), seen_at=T0 - timedelta(seconds=1), reasons=MIXED)
+    result = await delve.get_notifications(_ctx(view))
+    assert [n["reason"] for n in result["notifications"]] == ["reply", "mention", "quote"]
+    assert result["marked_read"] is True
+    assert view.update_calls == [_iso(T0 + timedelta(seconds=5, milliseconds=1))]
+    assert view.unread_count(bs.POST_REASONS) == 0
+
+
+async def test_delve_batches_never_skip_unread():
+    view = _delve_view(25, seen_at=T0 - timedelta(seconds=1))
+    ctx = _ctx(view)
+    seen: list[str] = []
+    for _ in range(3):
+        result = await delve.get_notifications(ctx, limit=10)
+        seen += [n["cid"] for n in result["notifications"]]
+        assert view.unread_count() == 25 - len(seen)
+    assert seen == [f"bafy{i}" for i in range(25)]
+
+
+async def test_delve_unread_count():
+    view = _delve_view(len(MIXED), seen_at=T0 - timedelta(seconds=1), reasons=MIXED)
+    assert await delve.unread_count(_ctx(view)) == {"count": 3}
+    assert view.update_calls == []
+
+
+async def test_delve_and_bluesky_read_markers_are_separate():
+    """Reading delve notifications must not touch Bluesky's (and vice versa)."""
+    bsky_view = FakeAppView(3, seen_at=T0 - timedelta(seconds=1))
+    delve_view = _delve_view(3, seen_at=T0 - timedelta(seconds=1))
+    await delve.get_notifications(_ctx(delve_view))
+    assert delve_view.unread_count() == 0
+    assert bsky_view.update_calls == [] and bsky_view.unread_count() == 3
+
+
+def test_delve_description_points_at_delve_lexicons():
+    desc = TOOL_REGISTRY.get("delve.get_notifications").description
+    assert "delve.town" in desc and "town.delve.notification.listNotifications" in desc
+    assert "app.bsky" not in desc

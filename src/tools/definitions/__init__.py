@@ -1,6 +1,7 @@
 # Import all tool definition modules so they auto-register with TOOL_REGISTRY
 import src.tools.definitions.atproto  # noqa: F401
 import src.tools.definitions.bluesky  # noqa: F401
+import src.tools.definitions.delve  # noqa: F401
 import src.tools.definitions.custom_tools  # noqa: F401
 import src.tools.definitions.image  # noqa: F401
 import src.tools.definitions.meet  # noqa: F401
