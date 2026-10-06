@@ -29,6 +29,7 @@ class SubAgentLLM:
         api_key: str | None,
         endpoint: str | None = None,
         auth_header: dict[str, str] | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         """``auth_header`` (openapi only) is sent instead of ``Authorization: Bearer <api_key>``."""
         if auth_header and api != "openapi":
@@ -40,6 +41,7 @@ class SubAgentLLM:
         self._api_key = api_key
         self._endpoint = endpoint
         self._auth_header = dict(auth_header) if auth_header else None
+        self._reasoning_effort = reasoning_effort or None
 
     async def complete(
         self,
@@ -99,6 +101,7 @@ class SubAgentLLM:
                     "model": self._model,
                     "messages": messages,
                     "max_tokens": max_tokens,
+                    **({"reasoning_effort": self._reasoning_effort} if self._reasoning_effort else {}),
                 },
             )
             if not resp.is_success:

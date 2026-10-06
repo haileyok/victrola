@@ -16,6 +16,13 @@ DENO_DIR = Path(__file__).parent / "deno"
 # security limits for deno execution
 MAX_CODE_SIZE = 50_000  # max input code size in characters
 MAX_TOOL_CALLS = 25  # max number of tool calls per execution
+# Per-tool caps within one execution. Calls past the cap get a tool error back
+# (the run continues). memory.delete is capped so a mistaken bulk delete, e.g.
+# deleting every search result, can't wipe out many memories in one step.
+PER_TOOL_CALL_LIMITS = {"memory.delete": 3}
+# Max bytes in one line of Deno stdout (one tool call or output message).
+# asyncio's default is 64 KiB, which large tool results/outputs exceed.
+MAX_STDOUT_LINE_BYTES = 16 * 1024 * 1024
 MAX_OUTPUT_SIZE = 1_000_000  # max total output size in bytes
 MAX_EXECUTION_TIME = 60.0  # total wall-clock timeout in seconds
 DENO_MEMORY_LIMIT_MB = 256  # v8 heap limit
@@ -543,6 +550,7 @@ import * as tools from "./{stub_name}";
             f"--v8-flags=--max-old-space-size={DENO_MEMORY_LIMIT_MB}",
             script_path,
             stdin=asyncio.subprocess.PIPE,
+            limit=MAX_STDOUT_LINE_BYTES,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=self._minimal_env(),
@@ -630,6 +638,7 @@ import * as tools from "./{stub_name}";
         process = await asyncio.create_subprocess_exec(
             *args,
             stdin=asyncio.subprocess.PIPE,
+            limit=MAX_STDOUT_LINE_BYTES,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=proc_env,
@@ -697,6 +706,7 @@ import * as tools from "./{stub_name}";
         debug_messages: list[str] = []
         error: str | None = None
         tool_call_count = 0
+        per_tool_counts: dict[str, int] = {}
         total_output_bytes = 0
         deadline = asyncio.get_running_loop().time() + MAX_EXECUTION_TIME
 
@@ -757,6 +767,20 @@ import * as tools from "./{stub_name}";
 
                     tool_name = message["tool"]
                     params = message["params"]
+                    per_tool_counts[tool_name] = per_tool_counts.get(tool_name, 0) + 1
+                    cap = PER_TOOL_CALL_LIMITS.get(tool_name)
+                    if cap is not None and per_tool_counts[tool_name] > cap:
+                        logger.warning("Refused %s call #%d (limit %d per execution)", tool_name, per_tool_counts[tool_name], cap)
+                        refusal = json.dumps({"__tool_error__": (
+                            f"{tool_name} is limited to {cap} calls per execution; this call was not run. "
+                            "Check what you are about to change and continue in a separate step if needed.")})
+                        try:
+                            process.stdin.write((refusal + "\n").encode())
+                            await process.stdin.drain()
+                        except (ConnectionResetError, BrokenPipeError):
+                            error = f"deno process exited while sending tool result for {tool_name}"
+                            break
+                        continue
                     if allowed_tools is not None and tool_name not in allowed_tools:
                         self._kill_process(process)
                         error = f"tool '{tool_name}' is not available in this execution mode"

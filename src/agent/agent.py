@@ -260,13 +260,16 @@ class OpenAICompatibleClient(AgentClient):
         model_name: str,
         endpoint: str,
         auth_header: dict[str, str] | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
-        """``auth_header``, if given, is sent instead of ``Authorization: Bearer <api_key>``."""
+        """``auth_header``, if given, is sent instead of ``Authorization: Bearer <api_key>``.
+        ``reasoning_effort``, if given, is sent as the ``reasoning_effort`` request field."""
         if not auth_header and not api_key:
             raise ValueError("either api_key or auth_header is required")
         self._auth_headers = dict(auth_header) if auth_header else {"Authorization": f"Bearer {api_key}"}
         self._model_name = model_name
         self._endpoint = endpoint.rstrip("/")
+        self._reasoning_effort = reasoning_effort or None
         self._http = httpx.AsyncClient(timeout=300.0)
 
     async def aclose(self) -> None:
@@ -289,6 +292,8 @@ class OpenAICompatibleClient(AgentClient):
 
         if tools:
             payload["tools"] = self._convert_tools(tools)
+        if self._reasoning_effort:
+            payload["reasoning_effort"] = self._reasoning_effort
 
         async def _do_post():
             resp = await self._http.post(
@@ -626,6 +631,7 @@ class Agent:
         sub_llm_client: Any | None = None,
         compact_threshold_chars: int = 240_000,
         model_auth_header: dict[str, str] | None = None,
+        model_reasoning_effort: str | None = None,
     ) -> None:
         """``model_auth_header`` (openapi only) replaces the API key for auth."""
         if model_auth_header and model_api != "openapi":
@@ -658,6 +664,7 @@ class Agent:
                     model_name=model_name,
                     endpoint=model_endpoint,
                     auth_header=model_auth_header,
+                    reasoning_effort=model_reasoning_effort,
                 )
             case "umans":
                 if not model_api_key:

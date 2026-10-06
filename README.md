@@ -277,6 +277,8 @@ MODEL_AUTH_HEADER_VALUE=your-key
 
 `SUB_MODEL_AUTH_HEADER_NAME` / `SUB_MODEL_AUTH_HEADER_VALUE` do the same for the sub-agent model. If they're unset and both models use `openapi`, the main model's header is reused.
 
+For reasoning models on `openapi`, `MODEL_REASONING_EFFORT` (e.g. `low`, `medium`, `high`) is sent as `reasoning_effort` on every request; leave it empty to use the provider's default. `SUB_MODEL_REASONING_EFFORT` does the same for the sub-agent model and falls back to the main setting when both use `openapi`.
+
 Sub-agent (used by `summarize` and anything else that needs a lighter model) defaults to the same key as the main model if left empty:
 
 ```env

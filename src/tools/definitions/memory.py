@@ -178,7 +178,11 @@ async def memory_update(
 
 @TOOL_REGISTRY.tool(
     name="memory.delete",
-    description="""Delete a single memory entry by ID. Other entries in the same scope are unaffected.""",
+    description="""Delete a single memory entry by ID. Other entries in the same scope are unaffected.
+
+Only delete an entry whose exact ID you have confirmed by reading that entry. Never delete
+search results in bulk: memory.search returns the closest matches, which include unrelated
+memories. Limited to 3 deletions per execution. Returns the deleted entry's content.""",
     parameters=[
         ToolParameter(
             name="id",
@@ -192,6 +196,7 @@ async def memory_delete(ctx: ToolContext, id: int) -> str:
     if store.memory is None:
         raise RuntimeError("MemoryStore is not initialized")
 
+    entry = await store.memory.get_entry(int(id))
     deleted = await store.memory.delete_entry(int(id))
     if not deleted:
         return f"Error: entry {id} not found"
@@ -200,6 +205,12 @@ async def memory_delete(ctx: ToolContext, id: int) -> str:
     if ctx._search_engine is not None:
         ctx.search_engine.invalidate_cache()
 
+    # Return what was deleted so a mistake is visible (and recoverable from the log).
+    if entry:
+        return (
+            f"Deleted memory entry (id={id}, type={entry.get('type')}, scope={entry.get('scope')}). "
+            f"Its content was: {entry.get('content')}"
+        )
     return f"Deleted memory entry (id={id})."
 
 

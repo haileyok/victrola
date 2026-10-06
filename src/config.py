@@ -30,6 +30,9 @@ class Config(BaseSettings):
     with model_auth_header_value; model_api_key is then not needed."""
     model_auth_header_value: str = ""
     """openapi only: value for model_auth_header_name"""
+    model_reasoning_effort: str = ""
+    """openapi only: sent as `reasoning_effort` (e.g. low, medium, high) for
+    reasoning models. Empty: not sent, so the provider's default applies."""
 
     # sub-agent model config (for summarize, research tools)
     sub_model_api: Literal["anthropic", "openai", "openapi", "umans"] = "anthropic"
@@ -46,6 +49,9 @@ class Config(BaseSettings):
     model's header is reused."""
     sub_model_auth_header_value: str = ""
     """openapi only: value for sub_model_auth_header_name"""
+    sub_model_reasoning_effort: str = ""
+    """openapi only: reasoning_effort for the sub-agent model. If empty and both
+    models use openapi, model_reasoning_effort is reused."""
 
     # local data
     data_dir: str = "data"

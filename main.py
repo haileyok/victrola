@@ -91,6 +91,13 @@ def build_services(
             "SUB_MODEL_AUTH_HEADER_NAME is only supported with SUB_MODEL_API=openapi; ignoring it"
         )
 
+    model_reasoning_effort = (
+        CONFIG.model_reasoning_effort if effective_model_api == "openapi" else ""
+    ) or None
+    sub_reasoning_effort = None
+    if CONFIG.sub_model_api == "openapi":
+        sub_reasoning_effort = CONFIG.sub_model_reasoning_effort or model_reasoning_effort
+
     sub_api_key = None
     if not sub_auth_header:
         sub_api_key = _resolve_sub_agent_key(
@@ -108,6 +115,7 @@ def build_services(
             api_key=sub_api_key,
             endpoint=sub_endpoint,
             auth_header=sub_auth_header,
+            reasoning_effort=sub_reasoning_effort,
         )
 
     tool_context = ToolContext(
@@ -130,6 +138,7 @@ def build_services(
         sub_llm_client=llm_client,
         compact_threshold_chars=CONFIG.compact_threshold_chars,
         model_auth_header=model_auth_header,
+        model_reasoning_effort=model_reasoning_effort,
     )
 
     return executor, agent
