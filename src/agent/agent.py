@@ -254,8 +254,17 @@ class AnthropicClient(AgentClient):
 class OpenAICompatibleClient(AgentClient):
     """client for openapi compatible apis like openai, moonshot, etc"""
 
-    def __init__(self, api_key: str, model_name: str, endpoint: str) -> None:
-        self._api_key = api_key
+    def __init__(
+        self,
+        api_key: str | None,
+        model_name: str,
+        endpoint: str,
+        auth_header: dict[str, str] | None = None,
+    ) -> None:
+        """``auth_header``, if given, is sent instead of ``Authorization: Bearer <api_key>``."""
+        if not auth_header and not api_key:
+            raise ValueError("either api_key or auth_header is required")
+        self._auth_headers = dict(auth_header) if auth_header else {"Authorization": f"Bearer {api_key}"}
         self._model_name = model_name
         self._endpoint = endpoint.rstrip("/")
         self._http = httpx.AsyncClient(timeout=300.0)
@@ -284,10 +293,7 @@ class OpenAICompatibleClient(AgentClient):
         async def _do_post():
             resp = await self._http.post(
                 f"{self._endpoint}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                },
+                headers={**self._auth_headers, "Content-Type": "application/json"},
                 json=payload,
             )
             if not resp.is_success:
@@ -619,7 +625,11 @@ class Agent:
         system_prompt_provider: Callable[[], Awaitable[str]] | None = None,
         sub_llm_client: Any | None = None,
         compact_threshold_chars: int = 240_000,
+        model_auth_header: dict[str, str] | None = None,
     ) -> None:
+        """``model_auth_header`` (openapi only) replaces the API key for auth."""
+        if model_auth_header and model_api != "openapi":
+            raise ValueError("a custom model auth header is only supported for openapi")
         match model_api:
             case "anthropic":
                 if not model_api_key:
@@ -637,14 +647,17 @@ class Agent:
                     endpoint="https://api.openai.com/v1",
                 )
             case "openapi":
-                if not model_api_key:
-                    raise ValueError("model_api_key is required for openapi")
+                if not model_api_key and not model_auth_header:
+                    raise ValueError(
+                        "model_api_key (or MODEL_AUTH_HEADER_NAME/VALUE) is required for openapi"
+                    )
                 if not model_endpoint:
                     raise ValueError("model_endpoint is required for openapi")
                 self._client = OpenAICompatibleClient(
                     api_key=model_api_key,
                     model_name=model_name,
                     endpoint=model_endpoint,
+                    auth_header=model_auth_header,
                 )
             case "umans":
                 if not model_api_key:

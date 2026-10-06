@@ -26,13 +26,20 @@ class SubAgentLLM:
         self,
         api: Literal["anthropic", "openai", "openapi", "umans"],
         model: str,
-        api_key: str,
+        api_key: str | None,
         endpoint: str | None = None,
+        auth_header: dict[str, str] | None = None,
     ) -> None:
+        """``auth_header`` (openapi only) is sent instead of ``Authorization: Bearer <api_key>``."""
+        if auth_header and api != "openapi":
+            raise ValueError("a custom auth header is only supported for openapi")
+        if not auth_header and not api_key:
+            raise ValueError("either api_key or auth_header is required")
         self._api = api
         self._model = model
         self._api_key = api_key
         self._endpoint = endpoint
+        self._auth_header = dict(auth_header) if auth_header else None
 
     async def complete(
         self,
@@ -85,7 +92,7 @@ class SubAgentLLM:
             resp = await client.post(
                 f"{endpoint}/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {self._api_key}",
+                    **(self._auth_header or {"Authorization": f"Bearer {self._api_key}"}),
                     "Content-Type": "application/json",
                 },
                 json={
