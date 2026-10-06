@@ -23,6 +23,9 @@ class Tool(BaseModel):
     parameters: list[ToolParameter]
     handler: Callable[..., Awaitable[Any]]  # async function
     source: Literal["builtin", "mcp"] = "builtin"
+    # Read-only, side-effect-free tools that schedule condition scripts may
+    # call. Everything else is off-limits to conditions (enforced host-side).
+    condition_safe: bool = False
 
 
 class ToolContext:
@@ -123,8 +126,13 @@ class ToolRegistry:
         name: str,
         description: str,
         parameters: list[ToolParameter] | None = None,
+        condition_safe: bool = False,
     ) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
-        """the main tool decorator for tools that you create"""
+        """the main tool decorator for tools that you create.
+
+        Set ``condition_safe=True`` only for read-only tools with no side
+        effects; schedule condition scripts are allowed to call those.
+        """
 
         def decorator(
             func: Callable[..., Awaitable[Any]],
@@ -134,6 +142,7 @@ class ToolRegistry:
                 description=description,
                 parameters=parameters or [],
                 handler=func,
+                condition_safe=condition_safe,
             )
             self.register(t)
             return func
@@ -294,7 +303,10 @@ class ToolRegistry:
             return first_line
         return first_line[:max_chars].rstrip() + "…"
 
-    def generate_typescript_types(self) -> str:
+    def condition_safe_tool_names(self) -> set[str]:
+        return {t.name for t in self._tools.values() if t.condition_safe}
+
+    def generate_typescript_types(self, condition_safe_only: bool = False) -> str:
         lines = [
             "// Auto-generated - do not edit",
             'import { callTool } from "./runtime.ts";',
@@ -303,6 +315,8 @@ class ToolRegistry:
 
         by_namespace: dict[str, list[Tool]] = {}
         for tool in self._tools.values():
+            if condition_safe_only and not tool.condition_safe:
+                continue
             namespace = tool.name.split(".")[0]
             by_namespace.setdefault(namespace, []).append(tool)
 

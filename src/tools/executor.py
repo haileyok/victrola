@@ -427,11 +427,13 @@ const WORKSPACE = {workspace_json};
         env: dict[str, str] | None = None,
         allow_net: bool = False,
     ) -> dict[str, Any]:
-        """Execute trigger condition TypeScript code WITHOUT the tools bridge.
+        """Execute trigger condition TypeScript code with a restricted tools bridge.
 
-        Condition scripts only have access to ``output()`` and ``debug()`` —
-        no backend tools. This prevents a condition predicate from performing
-        side effects via the tool registry.
+        Condition scripts get ``output()``, ``debug()``, and a ``tools``
+        namespace containing only condition-safe tools (read-only, no side
+        effects, e.g. ``tools.bluesky.unread_count()``). Calls to any other
+        tool, including hand-forged tool-call messages, kill the script, so a
+        condition predicate can't perform side effects via the tool registry.
         """
 
         if len(code) > MAX_CODE_SIZE:
@@ -441,8 +443,11 @@ const WORKSPACE = {workspace_json};
                 "debug": [],
             }
 
+        stub_path = self._write_stub_file(condition_safe_only=True)
+        stub_name = os.path.basename(stub_path)
         full_code = f"""
 import {{ output, debug }} from "./runtime.ts";
+import * as tools from "./{stub_name}";
 
 // --- condition code ---
 {code}
@@ -459,13 +464,15 @@ import {{ output, debug }} from "./runtime.ts";
                 temp_path,
                 allow_net=allow_net,
                 env=env or {},
-                allow_tool_calls=False,
+                allow_tool_calls=True,
+                allowed_tools=self._registry.condition_safe_tool_names(),
                 allow_workspace=False,
             )
         finally:
             os.unlink(temp_path)
+            os.unlink(stub_path)
 
-    def _write_stub_file(self) -> str:
+    def _write_stub_file(self, condition_safe_only: bool = False) -> str:
         """Write generated tool stubs to a unique file in DENO_DIR.
 
         Each execution gets its own stub file so concurrent executions can't
@@ -473,7 +480,7 @@ import {{ output, debug }} from "./runtime.ts";
         executor is shared across web, Discord, Signal, and the scheduler, so
         executions overlap. Returns the stub path; the caller must unlink it.
         """
-        tools_ts = self._registry.generate_typescript_types()
+        tools_ts = self._registry.generate_typescript_types(condition_safe_only=condition_safe_only)
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".ts", prefix="tools_", delete=False, dir=DENO_DIR
         ) as f:
@@ -550,8 +557,11 @@ import {{ output, debug }} from "./runtime.ts";
         env: dict[str, str] | None = None,
         allow_tool_calls: bool = True,
         allow_workspace: bool = True,
+        allowed_tools: set[str] | None = None,
     ) -> dict[str, Any]:
         """Run deno with configurable permissions for custom tools.
+
+        ``allowed_tools``, if given, restricts which tools the script may call.
 
         When ``allow_workspace`` is True (default, custom tools path), scoped
         workspace read/write access is granted. When False (condition code
@@ -625,10 +635,15 @@ import {{ output, debug }} from "./runtime.ts";
             env=proc_env,
         )
 
-        return await self._process_deno_output(process, allow_tool_calls=allow_tool_calls)
+        return await self._process_deno_output(
+            process, allow_tool_calls=allow_tool_calls, allowed_tools=allowed_tools
+        )
 
     async def _process_deno_output(
-        self, process: asyncio.subprocess.Process, allow_tool_calls: bool = True
+        self,
+        process: asyncio.subprocess.Process,
+        allow_tool_calls: bool = True,
+        allowed_tools: set[str] | None = None,
     ) -> dict[str, Any]:
         """Shared logic for processing deno subprocess output.
 
@@ -742,6 +757,10 @@ import {{ output, debug }} from "./runtime.ts";
 
                     tool_name = message["tool"]
                     params = message["params"]
+                    if allowed_tools is not None and tool_name not in allowed_tools:
+                        self._kill_process(process)
+                        error = f"tool '{tool_name}' is not available in this execution mode"
+                        break
                     logger.info(f"Tool call: {tool_name} with params: {params}")
 
                     try:
