@@ -51,7 +51,7 @@ def workspace_app(temp_workspace: Path):
     executor = MagicMock()
     conversation_manager = MagicMock()
     app = create_app(agent, executor, conversation_manager)
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://localhost") as client:
         yield client
 
 

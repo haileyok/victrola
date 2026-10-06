@@ -182,7 +182,13 @@ class CustomToolManager:
         return f"Custom tool '{tool.name}' created."
 
     async def update_tool(self, name: str, **fields: Any) -> str:
-        """Update an existing custom tool. Resets approval if code or parameters change."""
+        """Update an existing custom tool.
+
+        Resets approval when the change alters what runs or grants access the
+        operator did not approve: code or parameters change, requires_net goes from False
+        to True, or secrets are added. Narrowing (dropping secrets or network
+        access) keeps approval. Mirrors Scheduler.update_task.
+        """
         tool = self._tools.get(name)
         if tool is None:
             return f"Custom tool '{name}' not found."
@@ -192,6 +198,10 @@ class CustomToolManager:
             if value is None:
                 continue
             if key in ("code", "parameters") and getattr(tool, key) != value:
+                resets_approval = True
+            elif key == "requires_net" and value and not tool.requires_net:
+                resets_approval = True
+            elif key == "secrets" and set(value) - set(tool.secrets):
                 resets_approval = True
             setattr(tool, key, value)
 

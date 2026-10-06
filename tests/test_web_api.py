@@ -101,7 +101,8 @@ def app_client(tmp_path):
     agent = _make_stub_agent()
     conv_manager = ConversationManager(ctx=executor.ctx, llm_client=None)
     app = create_app(agent, executor, conv_manager)
-    client = TestClient(app)
+    # Host must be allowed by the DNS-rebinding check (default is "testserver").
+    client = TestClient(app, base_url="http://localhost")
     client._executor = executor  # type: ignore[attr-defined]
     client._loop = loop  # type: ignore[attr-defined]
     yield client
@@ -385,6 +386,37 @@ class TestCsrf:
             headers={"origin": "http://127.0.0.1.evil.com"},
         )
         assert resp.status_code == 403
+
+
+class TestHostCheck:
+    """DNS rebinding defense: reject requests whose Host isn't allowed."""
+
+    def test_rebound_host_blocked_on_get(self, app_client):
+        resp = app_client.get("/api/sessions", headers={"host": "evil.com"})
+        assert resp.status_code == 400
+
+    def test_rebound_host_with_port_blocked(self, app_client):
+        resp = app_client.get("/api/secrets", headers={"host": "evil.com:8000"})
+        assert resp.status_code == 400
+
+    def test_lookalike_host_blocked(self, app_client):
+        resp = app_client.get(
+            "/api/sessions", headers={"host": "localhost.evil.com:8000"}
+        )
+        assert resp.status_code == 400
+
+    def test_rebound_host_blocked_on_static(self, app_client):
+        resp = app_client.get("/", headers={"host": "evil.com"})
+        assert resp.status_code == 400
+
+    def test_loopback_hosts_allowed(self, app_client):
+        for host in ("localhost:8000", "127.0.0.1:8000", "[::1]:8000", "LOCALHOST"):
+            resp = app_client.get("/api/sessions", headers={"host": host})
+            assert resp.status_code == 200, host
+
+    def test_malformed_host_blocked(self, app_client):
+        resp = app_client.get("/api/sessions", headers={"host": "[::1"})
+        assert resp.status_code == 400
 
 
 class TestChatSSE:
