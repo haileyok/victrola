@@ -29,6 +29,11 @@ _PAGE_SIZE = 100
 _MAX_PAGES = 10
 _MAX_LIMIT = 100
 
+# By default the agent only gets notifications that are posts addressed to it
+# or about its posts. Likes, reposts, follows, etc. are skipped: they never
+# wake it, and get marked read along the way without being returned.
+POST_REASONS = ("mention", "reply", "quote")
+
 # Serializes calls so two concurrent runs can't return the same notifications.
 _lock = asyncio.Lock()
 
@@ -88,21 +93,86 @@ async def _list_page(ctx: ToolContext, cursor: str | None) -> dict[str, Any]:
     return data
 
 
+def _check_reasons(reasons: Any) -> set[str]:
+    if reasons is None:
+        return set(POST_REASONS)
+    if (
+        not isinstance(reasons, list)
+        or not reasons
+        or not all(isinstance(r, str) and r for r in reasons)
+    ):
+        raise AtprotoError(
+            "reasons must be a non-empty array of notification reasons, e.g. "
+            '["mention", "reply", "quote"]'
+        )
+    return set(reasons)
+
+
+async def _scan_unread(
+    ctx: ToolContext, reasons: set[str]
+) -> tuple[list[dict[str, Any]], datetime | None, bool]:
+    """Collect unread notifications with the given reasons, newest first.
+
+    Pages back until the first already-read notification of ANY reason: read
+    state is a single "seen up to" time, so everything older is read too.
+    Returns (matching unread, the server's seenAt, whether paging stopped at
+    the page cap while still seeing unread notifications).
+    """
+    matching: list[dict[str, Any]] = []
+    server_seen_at: datetime | None = None
+    cursor: str | None = None
+    reached_read = False
+    for _ in range(_MAX_PAGES):
+        page = await _list_page(ctx, cursor)
+        if server_seen_at is None:
+            server_seen_at = _parse_time(page.get("seenAt"))
+        for notif in page["notifications"]:
+            if not isinstance(notif, dict):
+                continue
+            if notif.get("isRead"):
+                reached_read = True
+                break
+            if notif.get("reason") in reasons:
+                matching.append(notif)
+        cursor = page.get("cursor")
+        if reached_read or not cursor:
+            break
+    return matching, server_seen_at, not reached_read and bool(cursor)
+
+
+_REASONS_PARAM_DESC = (
+    "Which notification reasons count. Default: posts only, "
+    f"{list(POST_REASONS)}. Other reasons include like, repost, follow, "
+    "like-via-repost, repost-via-repost, subscribed-post, starterpack-joined, "
+    "verified, unverified."
+)
+
+
 @TOOL_REGISTRY.tool(
     name="bluesky.unread_count",
     description=(
-        "Return how many unread Bluesky notifications your account has, as "
-        "{\"count\": n}, without marking anything read. Read-only, so schedule "
-        "condition scripts can call it to wake you only when there's something "
-        "new: e.g. `const r = await tools.bluesky.unread_count(); "
-        "output({ wake: r.count > 0 });`. Use bluesky.get_notifications to read "
-        "(and mark read) the notifications themselves."
+        "Return how many unread Bluesky post notifications (mentions, replies, "
+        "quotes) your account has, as {\"count\": n}, without marking anything "
+        "read. Likes, follows, reposts, etc. are not counted unless you pass "
+        "`reasons`. Read-only, so schedule condition scripts can call it to "
+        "wake you only when someone has posted to you: e.g. `const r = await "
+        "tools.bluesky.unread_count(); output({ wake: r.count > 0 });`. Use "
+        "bluesky.get_notifications to read (and mark read) the notifications."
     ),
-    parameters=[],
+    parameters=[
+        ToolParameter(
+            name="reasons",
+            type="array",
+            description=_REASONS_PARAM_DESC,
+            required=False,
+        ),
+    ],
     condition_safe=True,
 )
 @_tool
-async def unread_count(ctx: ToolContext) -> dict[str, Any]:
+async def unread_count(ctx: ToolContext, reasons: list[str] | None = None) -> dict[str, Any]:
+    wanted = _check_reasons(reasons)
+    # Cheap check first: nothing unread of any kind means nothing to scan.
     data = await _authed_request(
         ctx,
         "GET",
@@ -110,27 +180,36 @@ async def unread_count(ctx: ToolContext) -> dict[str, Any]:
         _UNREAD_NSID,
         headers={"atproto-proxy": _APPVIEW_PROXY},
     )
-    count = data.get("count") if isinstance(data, dict) else None
-    if not isinstance(count, int):
+    total = data.get("count") if isinstance(data, dict) else None
+    if not isinstance(total, int):
         raise AtprotoError(f"{_UNREAD_NSID} returned an unexpected response")
-    return {"count": count}
+    if total == 0:
+        return {"count": 0}
+    matching, _, beyond_scan = await _scan_unread(ctx, wanted)
+    result: dict[str, Any] = {"count": len(matching)}
+    if beyond_scan:
+        result["capped"] = True  # more unread exist past the scan limit
+    return result
 
 
 @TOOL_REGISTRY.tool(
     name="bluesky.get_notifications",
     description=(
-        "Get your Bluesky account's unread notifications and mark them as read. "
-        "Returns the OLDEST unread notifications first (up to `limit`, oldest to "
-        "newest), and marks read exactly those and anything older, so nothing is "
-        "marked read without being returned. If `more_unread` is true, newer "
+        "Get your Bluesky account's unread post notifications (mentions, "
+        "replies, quotes) and mark them as read. Likes, reposts, follows, etc. "
+        "are skipped unless you pass `reasons`; skipped ones older than what's "
+        "returned get marked read too. Returns the OLDEST unread notifications "
+        "first (up to `limit`, oldest to newest), and marks read exactly up to "
+        "the newest one returned, so no matching notification is marked read "
+        "without being returned. If `more_unread` is true, newer matching "
         "unread notifications remain: call again to get the next batch. Each "
-        "notification has `reason` (like, repost, follow, mention, reply, quote, "
-        "...), `uri`, `cid`, `author`, `indexed_at`, `record` (the liked/replied/"
-        "etc. record's content), and `reason_subject` (the subject's at:// URI, "
-        "e.g. your post that was liked). `marked_read` says whether the read "
-        "marker was updated; if `mark_read_error` is present, the notifications "
-        "were returned but NOT marked read. For read notifications or other "
-        "filters, use atproto.query with app.bsky.notification.listNotifications."
+        "notification has `reason` (mention, reply, quote, ...), `uri`, `cid`, "
+        "`author`, `indexed_at`, `record` (the post's content), and "
+        "`reason_subject` (the at:// URI of your post it's about, for replies "
+        "and quotes). `marked_read` says whether the read marker was updated; "
+        "if `mark_read_error` is present, the notifications were returned but "
+        "NOT marked read. For read notifications or other filters, use "
+        "atproto.query with app.bsky.notification.listNotifications."
     ),
     parameters=[
         ToolParameter(
@@ -140,38 +219,26 @@ async def unread_count(ctx: ToolContext) -> dict[str, Any]:
             required=False,
             default=50,
         ),
+        ToolParameter(
+            name="reasons",
+            type="array",
+            description=_REASONS_PARAM_DESC,
+            required=False,
+        ),
     ],
 )
 @_tool
-async def get_notifications(ctx: ToolContext, limit: int = 50) -> dict[str, Any]:
+async def get_notifications(
+    ctx: ToolContext, limit: int = 50, reasons: list[str] | None = None
+) -> dict[str, Any]:
     try:
         limit = max(1, min(_MAX_LIMIT, int(limit)))
     except (TypeError, ValueError):
         raise AtprotoError(f"limit must be a number, got {limit!r}")
+    wanted = _check_reasons(reasons)
 
     async with _lock:
-        # Page backwards (newest first) collecting unread notifications until we
-        # reach one that's already read, or run out.
-        unread: list[dict[str, Any]] = []
-        server_seen_at: datetime | None = None
-        cursor: str | None = None
-        reached_read = False
-        for _ in range(_MAX_PAGES):
-            page = await _list_page(ctx, cursor)
-            if server_seen_at is None:
-                server_seen_at = _parse_time(page.get("seenAt"))
-            for notif in page["notifications"]:
-                if not isinstance(notif, dict):
-                    continue
-                if notif.get("isRead"):
-                    reached_read = True
-                    break
-                unread.append(notif)
-            cursor = page.get("cursor")
-            if reached_read or not cursor:
-                break
-        # True when paging stopped at the cap while still seeing unread ones.
-        older_unread_beyond_scan = not reached_read and bool(cursor)
+        unread, server_seen_at, older_unread_beyond_scan = await _scan_unread(ctx, wanted)
 
         if not unread:
             return {

@@ -104,7 +104,13 @@ async def test_unread_count(monkeypatch):
                 200, json={"did": "did:plc:a", "handle": "a.test", "accessJwt": "t", "refreshJwt": "r"}
             )
         if request.url.path == "/xrpc/app.bsky.notification.getUnreadCount":
-            return httpx.Response(200, json={"count": 7})
+            return httpx.Response(200, json={"count": 9})
+        if request.url.path == "/xrpc/app.bsky.notification.listNotifications":
+            # 9 unread: 7 replies/mentions/quotes and 2 likes; then a read one.
+            reasons = ["reply", "like", "mention", "quote", "reply", "like", "reply", "quote", "mention"]
+            items = [{"reason": r, "isRead": False, "indexedAt": "2026-10-06T00:00:00.000Z"} for r in reasons]
+            items.append({"reason": "reply", "isRead": True, "indexedAt": "2026-10-05T00:00:00.000Z"})
+            return httpx.Response(200, json={"notifications": items})
         return httpx.Response(404)
 
     ctx = MagicMock(spec=ToolContext)
