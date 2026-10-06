@@ -1,13 +1,17 @@
 from typing import Literal
 
 import logging
+import re
 from datetime import timezone, tzinfo
 from zoneinfo import ZoneInfo
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
+
+# RFC 9110 header field-name token characters.
+_HEADER_NAME_RE = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 
 
 class Config(BaseSettings):
@@ -20,6 +24,12 @@ class Config(BaseSettings):
     """the model api key"""
     model_endpoint: str = ""
     """for openapi model apis, the endpoint to use"""
+    model_auth_header_name: str = ""
+    """openapi only: send this HTTP header for auth instead of
+    `Authorization: Bearer <model_api_key>` (e.g. `x-gateway-key`). Set together
+    with model_auth_header_value; model_api_key is then not needed."""
+    model_auth_header_value: str = ""
+    """openapi only: value for model_auth_header_name"""
 
     # sub-agent model config (for summarize, research tools)
     sub_model_api: Literal["anthropic", "openai", "openapi", "umans"] = "anthropic"
@@ -30,6 +40,12 @@ class Config(BaseSettings):
     """api key for sub-agent model (falls back to model_api_key if empty)"""
     sub_model_endpoint: str = ""
     """endpoint for sub-agent model (for openapi providers like Moonshot/Kimi)"""
+    sub_model_auth_header_name: str = ""
+    """openapi only: auth header for the sub-agent model, like
+    model_auth_header_name. If unset and both models use openapi, the main
+    model's header is reused."""
+    sub_model_auth_header_value: str = ""
+    """openapi only: value for sub_model_auth_header_name"""
 
     # local data
     data_dir: str = "data"
@@ -130,6 +146,46 @@ class Config(BaseSettings):
                 f"path separators in permission flags): {v!r}"
             )
         return v
+
+    @field_validator("model_auth_header_name", "sub_model_auth_header_name")
+    @classmethod
+    def _header_name_is_token(cls, v: str) -> str:
+        v = v.strip()
+        if v and not _HEADER_NAME_RE.fullmatch(v):
+            raise ValueError(f"not a valid HTTP header name: {v!r}")
+        return v
+
+    @field_validator("model_auth_header_value", "sub_model_auth_header_value")
+    @classmethod
+    def _header_value_single_line(cls, v: str) -> str:
+        # A CR/LF would let the value inject extra headers.
+        if "\r" in v or "\n" in v:
+            raise ValueError("auth header value must not contain line breaks")
+        return v.strip()
+
+    @model_validator(mode="after")
+    def _header_pairs_complete(self) -> "Config":
+        for prefix in ("model", "sub_model"):
+            name = getattr(self, f"{prefix}_auth_header_name")
+            value = getattr(self, f"{prefix}_auth_header_value")
+            if bool(name) != bool(value):
+                upper = prefix.upper()
+                raise ValueError(
+                    f"set both {upper}_AUTH_HEADER_NAME and {upper}_AUTH_HEADER_VALUE, or neither"
+                )
+        return self
+
+    def model_auth_header(self) -> dict[str, str] | None:
+        """The main model's custom auth header, or None to use the API key."""
+        if self.model_auth_header_name:
+            return {self.model_auth_header_name: self.model_auth_header_value}
+        return None
+
+    def sub_model_auth_header(self) -> dict[str, str] | None:
+        """The sub-agent model's custom auth header, or None to use the API key."""
+        if self.sub_model_auth_header_name:
+            return {self.sub_model_auth_header_name: self.sub_model_auth_header_value}
+        return None
 
 
 CONFIG = Config()

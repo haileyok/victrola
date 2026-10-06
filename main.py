@@ -73,20 +73,41 @@ def build_services(
     effective_model_api = model_api or CONFIG.model_api
     effective_model_api_key = model_api_key or CONFIG.model_api_key
 
-    sub_api_key = _resolve_sub_agent_key(
-        model_api=effective_model_api,
-        model_api_key=effective_model_api_key,
-        sub_model_api=CONFIG.sub_model_api,
-        sub_model_api_key=CONFIG.sub_model_api_key,
-    )
+    # Custom auth headers replace the API key, for openapi providers only.
+    model_auth_header = None
+    if CONFIG.model_auth_header():
+        if effective_model_api == "openapi":
+            model_auth_header = CONFIG.model_auth_header()
+        else:
+            logger.warning(
+                "MODEL_AUTH_HEADER_NAME is only supported with MODEL_API=openapi; ignoring it"
+            )
+    sub_auth_header = None
+    if CONFIG.sub_model_api == "openapi":
+        # Like the API key, fall back to the main model's header when both use openapi.
+        sub_auth_header = CONFIG.sub_model_auth_header() or model_auth_header
+    elif CONFIG.sub_model_auth_header():
+        logger.warning(
+            "SUB_MODEL_AUTH_HEADER_NAME is only supported with SUB_MODEL_API=openapi; ignoring it"
+        )
+
+    sub_api_key = None
+    if not sub_auth_header:
+        sub_api_key = _resolve_sub_agent_key(
+            model_api=effective_model_api,
+            model_api_key=effective_model_api_key,
+            sub_model_api=CONFIG.sub_model_api,
+            sub_model_api_key=CONFIG.sub_model_api_key,
+        )
     llm_client = None
-    if sub_api_key:
+    if sub_api_key or sub_auth_header:
         sub_endpoint = _resolve_sub_agent_endpoint()
         llm_client = SubAgentLLM(
             api=CONFIG.sub_model_api,
             model=CONFIG.sub_model_name,
             api_key=sub_api_key,
             endpoint=sub_endpoint,
+            auth_header=sub_auth_header,
         )
 
     tool_context = ToolContext(
@@ -108,6 +129,7 @@ def build_services(
         tool_executor=executor,
         sub_llm_client=llm_client,
         compact_threshold_chars=CONFIG.compact_threshold_chars,
+        model_auth_header=model_auth_header,
     )
 
     return executor, agent

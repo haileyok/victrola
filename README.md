@@ -264,6 +264,18 @@ MODEL_NAME=gemma4:26b-moe
 MODEL_API_KEY=ollama      # Ollama ignores the value; just can't be empty
 ```
 
+For an OpenAI-compatible endpoint that authenticates with its own header (e.g. an API gateway) instead of `Authorization: Bearer <key>`, set a header name and value; `MODEL_API_KEY` can then be left empty. This is supported for `openapi` only, and the header is sent *instead of* the bearer token:
+
+```env
+MODEL_API=openapi
+MODEL_ENDPOINT=https://gateway.example.com/v1
+MODEL_NAME=some-model
+MODEL_AUTH_HEADER_NAME=x-gateway-key
+MODEL_AUTH_HEADER_VALUE=your-key
+```
+
+`SUB_MODEL_AUTH_HEADER_NAME` / `SUB_MODEL_AUTH_HEADER_VALUE` do the same for the sub-agent model. If they're unset and both models use `openapi`, the main model's header is reused.
+
 Sub-agent (used by `summarize` and anything else that needs a lighter model) defaults to the same key as the main model if left empty:
 
 ```env
