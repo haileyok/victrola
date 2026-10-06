@@ -22,6 +22,7 @@ from src.tools.registry import TOOL_REGISTRY, ToolContext, ToolParameter
 _APPVIEW_PROXY = _DEFAULT_PROXIES["app.bsky."]
 _LIST_NSID = "app.bsky.notification.listNotifications"
 _UPDATE_SEEN_NSID = "app.bsky.notification.updateSeen"
+_UNREAD_NSID = "app.bsky.notification.getUnreadCount"
 
 _PAGE_SIZE = 100
 # How far back to page looking for the oldest unread notification.
@@ -85,6 +86,34 @@ async def _list_page(ctx: ToolContext, cursor: str | None) -> dict[str, Any]:
     if not isinstance(data, dict) or not isinstance(data.get("notifications"), list):
         raise AtprotoError(f"{_LIST_NSID} returned an unexpected response")
     return data
+
+
+@TOOL_REGISTRY.tool(
+    name="bluesky.unread_count",
+    description=(
+        "Return how many unread Bluesky notifications your account has, as "
+        "{\"count\": n}, without marking anything read. Read-only, so schedule "
+        "condition scripts can call it to wake you only when there's something "
+        "new: e.g. `const r = await tools.bluesky.unread_count(); "
+        "output({ wake: r.count > 0 });`. Use bluesky.get_notifications to read "
+        "(and mark read) the notifications themselves."
+    ),
+    parameters=[],
+    condition_safe=True,
+)
+@_tool
+async def unread_count(ctx: ToolContext) -> dict[str, Any]:
+    data = await _authed_request(
+        ctx,
+        "GET",
+        _UNREAD_NSID,
+        _UNREAD_NSID,
+        headers={"atproto-proxy": _APPVIEW_PROXY},
+    )
+    count = data.get("count") if isinstance(data, dict) else None
+    if not isinstance(count, int):
+        raise AtprotoError(f"{_UNREAD_NSID} returned an unexpected response")
+    return {"count": count}
 
 
 @TOOL_REGISTRY.tool(

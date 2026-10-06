@@ -30,7 +30,7 @@ Deno runs with the bare minimum of permissions: scoped filesystem access limited
 | `image` | `view_image` | Fetch an image URL and include it inline. |
 | `meet` | `create_link` | Create a standalone Google Meet link via the Google Meet REST API (requires `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` secrets). |
 | `atproto` | `whoami`, `resolve`, `create_record`, `put_record`, `delete_record`, `get_record`, `list_records`, `upload_blob`, `query`, `procedure` | General AT Protocol access as the agent's own account: write records to its repo, read any repo, upload blobs, and call any XRPC method (Bluesky or otherwise) through its PDS. Requires `ATPROTO_IDENTIFIER` and `ATPROTO_APP_PASSWORD` secrets; see [AT Protocol](#at-protocol-optional). |
-| `bluesky` | `get_notifications` | Get the agent account's unread Bluesky notifications and mark them read (oldest unread first, so none are marked read unseen). Uses the `atproto` account. |
+| `bluesky` | `get_notifications`, `unread_count` | Get the agent account's unread Bluesky notifications and mark them read (oldest unread first, so none are marked read unseen), or just count them without marking anything (usable from schedule triggers). Uses the `atproto` account. |
 | `custom_tools` | `create_custom_tool`, `call_tool`, etc. | Agent-written tools (see below). |
 | `system` | `get_tool_docs` | Fetch full parameter docs for any tool (typically MCP tools, which are listed in a compact catalog in the system prompt). |
 
@@ -80,6 +80,7 @@ A scheduled task can optionally have a **condition script** — TypeScript that 
 
 - The condition script calls `output({ wake: true })` to wake the agent, or `output({ wake: false })` to skip this cycle.
 - Condition code runs in the same Deno sandbox as custom tools, with optional network access and secrets.
+- Condition code can't call the agent's tools, except ones marked read-only and side-effect-free for this purpose (`condition_safe=True` in the tool definition), which appear as `tools.*` in the script. Calling any other tool kills the script. Currently: `tools.bluesky.unread_count()`, so a trigger like `const r = await tools.bluesky.unread_count(); output({ wake: r.count > 0 });` wakes the agent only when there are new Bluesky notifications, reusing its existing sign-in.
 - Condition code requires **operator approval** before it will fire (same gate as custom tools). Until approved, the task skips silently.
 - If a condition script fails 3 consecutive times, the task is auto-disabled.
 - The operator can test condition code via the web interface before approving.
