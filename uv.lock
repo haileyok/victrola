@@ -1736,7 +1736,7 @@ requires-dist = [
     { name = "exa-py", specifier = ">=2.3.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.28.0" },
-    { name = "mcp", specifier = ">=1.28.0" },
+    { name = "mcp", specifier = ">=1.28.0,<2" },
     { name = "numpy", specifier = ">=2.0.0" },
     { name = "playwright", specifier = ">=1.40.0" },
     { name = "pydantic", specifier = ">=2.12.5" },
