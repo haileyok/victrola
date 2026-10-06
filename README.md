@@ -29,6 +29,7 @@ Deno runs with the bare minimum of permissions: scoped filesystem access limited
 | `web` | search tools via [Exa](https://exa.ai) (requires `EXA_API_KEY`). |
 | `image` | `view_image` | Fetch an image URL and include it inline. |
 | `meet` | `create_link` | Create a standalone Google Meet link via the Google Meet REST API (requires `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` secrets). |
+| `atproto` | `whoami`, `resolve`, `create_record`, `put_record`, `delete_record`, `get_record`, `list_records`, `upload_blob`, `query`, `procedure` | General AT Protocol access as the agent's own account: write records to its repo, read any repo, upload blobs, and call any XRPC method (Bluesky or otherwise) through its PDS. Requires `ATPROTO_IDENTIFIER` and `ATPROTO_APP_PASSWORD` secrets; see [AT Protocol](#at-protocol-optional). |
 | `custom_tools` | `create_custom_tool`, `call_tool`, etc. | Agent-written tools (see below). |
 | `system` | `get_tool_docs` | Fetch full parameter docs for any tool (typically MCP tools, which are listed in a compact catalog in the system prompt). |
 
@@ -441,6 +442,32 @@ The agent can now call `meet.create_link` from `execute_code`. The optional `acc
 - `restricted` — only invited users join without knocking; everyone else must knock
 
 **Troubleshooting:** If the tool returns an OAuth error, the refresh token may have expired or been revoked. Re-authorize via the OAuth Playground (step 5) and update the `GOOGLE_REFRESH_TOKEN` secret.
+
+## AT Protocol (optional)
+
+The `atproto` tools give the agent general access to the AT Protocol network (Bluesky and any other atproto app) as its own account. They are deliberately low-level: the agent writes records to its repo, reads records from any repo, uploads blobs, and calls any XRPC method through its PDS. App-specific behavior, like a "post to Bluesky" or "check my notifications" tool, is left for the agent to build as custom tools that call `tools.atproto.*`. Those custom tools never see the account password.
+
+**Setup:**
+
+1. Create an account for the agent (on Bluesky or any PDS). Use a dedicated account, not your personal one.
+2. In that account, create an **app password** (Bluesky: Settings → Privacy and security → App passwords). Tick "Allow access to your direct messages" only if you want the agent to use DMs.
+3. In the victrola web interface → **Secrets** page, add:
+   - `ATPROTO_IDENTIFIER`: the account's handle (e.g. `myagent.bsky.social`) or DID
+   - `ATPROTO_APP_PASSWORD`: the app password
+   - `ATPROTO_PDS_URL` (optional): the PDS URL. If unset, it's looked up from the account's DID document.
+
+**Tools:**
+
+| Tool | What it does |
+|---|---|
+| `whoami` | The agent's DID, handle, and PDS. |
+| `resolve` | Resolve any handle or DID to its DID, handle, and PDS. |
+| `create_record`, `put_record`, `delete_record` | Write to the agent's own repo (`com.atproto.repo.*`). `$type` defaults to the collection. |
+| `get_record`, `list_records` | Read records from any repo, directly from the PDS hosting it. |
+| `upload_blob` | Upload a workspace file (e.g. an image) and get a blob reference to embed in a record. |
+| `query`, `procedure` | Call any XRPC GET/POST method as the agent, e.g. `app.bsky.notification.listNotifications`. Calls are forwarded with the `atproto-proxy` header: `app.bsky.*` goes to Bluesky's AppView and `chat.bsky.*` to Bluesky's chat service by default, anything else to the PDS itself, or pass `proxy` to choose another service. |
+
+**What the agent can and can't do:** with an app password it can post, reply, like, follow, block, edit its profile, and so on, publicly and without asking you first. App passwords can't change the account's email or password, create other app passwords, or delete the account. To cut off access, revoke the app password in the account's settings.
 
 ## Compaction (optional)
 
