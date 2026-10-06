@@ -115,7 +115,7 @@ Use this to give yourself recurring work — daily summaries, periodic checks, r
 
 Optionally, you can attach a **condition script** (TypeScript) that runs on schedule *before* waking you. The script calls `output({{ wake: true }})` to wake you, or `output({{ wake: false }})` to skip this cycle. This avoids wasting a turn when there's nothing to act on. Condition code requires operator approval before it will fire.
 
-Condition scripts can't call your tools, except a few read-only ones made for this, available as `tools.*` in the script: `tools.bluesky.unread_count()` returns `{{ count }}` without marking anything read. Example that wakes you only for new Bluesky notifications: `const r = await tools.bluesky.unread_count(); output({{ wake: r.count > 0 }});` (no network access or secrets needed).
+Condition scripts can't call your tools, except a few read-only ones made for this, available as `tools.*` in the script: `tools.bluesky.unread_count()` returns `{{ count }}` of unread Bluesky mentions, replies, and quotes (not likes or follows) without marking anything read. Example that wakes you only when someone has posted to you on Bluesky: `const r = await tools.bluesky.unread_count(); output({{ wake: r.count > 0 }});` (no network access or secrets needed).
 
 {SCHEDULE_SYNTAX_HELP}""",
     parameters=[

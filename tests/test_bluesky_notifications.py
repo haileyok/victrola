@@ -28,8 +28,10 @@ def _iso(dt: datetime) -> str:
 
 
 class FakeAppView:
-    def __init__(self, count: int, seen_at: datetime | None) -> None:
+    def __init__(self, count: int, seen_at: datetime | None, reasons: list[str] | None = None) -> None:
         # notifications[i] is i seconds after T0; listed newest first.
+        # reasons[i] is notification i's reason (default: all replies).
+        reasons = reasons or ["reply"] * count
         self.notifs = [
             {
                 "uri": f"at://did:plc:fan{i}/app.bsky.feed.like/{i}",
@@ -42,9 +44,9 @@ class FakeAppView:
                     "viewer": {"muted": False},
                     "labels": [],
                 },
-                "reason": "like",
+                "reason": reasons[i],
                 "reasonSubject": "at://did:plc:agent/app.bsky.feed.post/abc",
-                "record": {"$type": "app.bsky.feed.like"},
+                "record": {"$type": "app.bsky.feed.post", "text": f"hi {i}"},
                 "indexedAt": _iso(T0 + timedelta(seconds=i)),
                 "labels": [],
             }
@@ -54,6 +56,7 @@ class FakeAppView:
         self.update_calls: list[str] = []
         self.list_calls = 0
         self.fail_update = False
+        self.unread_count_calls = 0
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -80,6 +83,9 @@ class FakeAppView:
             if self.seen_at is not None:
                 body["seenAt"] = _iso(self.seen_at)
             return httpx.Response(200, json=body)
+        if path == "/xrpc/app.bsky.notification.getUnreadCount":
+            self.unread_count_calls += 1
+            return httpx.Response(200, json={"count": self.unread_count()})
         if path == "/xrpc/app.bsky.notification.updateSeen":
             if self.fail_update:
                 return httpx.Response(500, json={"error": "InternalServerError"})
@@ -89,12 +95,11 @@ class FakeAppView:
             return httpx.Response(200)
         return httpx.Response(404)
 
-    def unread_count(self) -> int:
-        return sum(
-            1
-            for n in self.notifs
-            if not (self.seen_at and self.seen_at > datetime.fromisoformat(n["indexedAt"]))
-        )
+    def is_unread(self, n: dict[str, Any]) -> bool:
+        return not (self.seen_at and self.seen_at > datetime.fromisoformat(n["indexedAt"]))
+
+    def unread_count(self, reasons: tuple[str, ...] | None = None) -> int:
+        return sum(1 for n in self.notifs if self.is_unread(n) and (reasons is None or n["reason"] in reasons))
 
 
 @pytest.fixture(autouse=True)
@@ -197,9 +202,9 @@ async def test_notifications_are_compacted():
     result = await bs.get_notifications(_ctx(view))
     n = result["notifications"][0]
     assert n["author"] == {"did": "did:plc:fan0", "handle": "fan0.test", "displayName": "Fan 0"}
-    assert n["reason"] == "like"
+    assert n["reason"] == "reply"
     assert n["reason_subject"] == "at://did:plc:agent/app.bsky.feed.post/abc"
-    assert n["record"] == {"$type": "app.bsky.feed.like"}
+    assert n["record"] == {"$type": "app.bsky.feed.post", "text": "hi 0"}
     assert "avatar" not in json.dumps(n)
 
 
@@ -215,3 +220,77 @@ async def test_list_failure_is_reported():
     ctx.http_client = httpx.AsyncClient(transport=httpx.MockTransport(broken))
     result = await bs.get_notifications(ctx)
     assert result["status"] == 502
+
+
+# --- post-only filtering --------------------------------------------------------
+
+MIXED = ["like", "reply", "follow", "mention", "like", "quote", "repost", "like"]
+
+
+async def test_only_post_notifications_returned():
+    view = FakeAppView(len(MIXED), seen_at=T0 - timedelta(seconds=1), reasons=MIXED)
+    result = await bs.get_notifications(_ctx(view))
+    assert [n["reason"] for n in result["notifications"]] == ["reply", "mention", "quote"]
+    # Marked read through the newest post (index 5); the like at index 7 and
+    # repost at 6 are newer, so they stay unread.
+    assert view.update_calls == [_iso(T0 + timedelta(seconds=5, milliseconds=1))]
+    assert view.unread_count() == 2
+    assert view.unread_count(bs.POST_REASONS) == 0
+
+
+async def test_no_post_notifications_marks_nothing():
+    view = FakeAppView(4, seen_at=T0 - timedelta(seconds=1), reasons=["like", "follow", "repost", "like"])
+    result = await bs.get_notifications(_ctx(view))
+    assert result["notifications"] == []
+    assert result["marked_read"] is False
+    assert view.update_calls == []
+
+
+async def test_post_batches_never_skip_unread_posts():
+    reasons = ["like", "reply"] * 15  # 15 replies interleaved with 15 likes
+    view = FakeAppView(len(reasons), seen_at=T0 - timedelta(seconds=1), reasons=reasons)
+    ctx = _ctx(view)
+    seen: list[str] = []
+    for _ in range(3):
+        result = await bs.get_notifications(ctx, limit=5)
+        seen += [n["cid"] for n in result["notifications"]]
+        assert view.unread_count(bs.POST_REASONS) == 15 - len(seen)
+    assert seen == [f"bafy{i}" for i in range(1, 30, 2)]
+    assert result["more_unread"] is False
+
+
+async def test_reasons_override():
+    view = FakeAppView(len(MIXED), seen_at=T0 - timedelta(seconds=1), reasons=MIXED)
+    result = await bs.get_notifications(_ctx(view), reasons=["like"])
+    assert [n["cid"] for n in result["notifications"]] == ["bafy0", "bafy4", "bafy7"]
+
+
+@pytest.mark.parametrize("bad", [[], "reply", [""], [1]])
+async def test_bad_reasons_rejected(bad):
+    view = FakeAppView(1, seen_at=None)
+    result = await bs.get_notifications(_ctx(view), reasons=bad)
+    assert "reasons" in result["error"]
+    assert view.list_calls == 0
+
+
+async def test_unread_count_counts_only_posts():
+    view = FakeAppView(len(MIXED), seen_at=T0 - timedelta(seconds=1), reasons=MIXED)
+    assert await bs.unread_count(_ctx(view)) == {"count": 3}
+    assert view.update_calls == []  # never marks read
+
+
+async def test_unread_count_zero_when_only_likes():
+    view = FakeAppView(3, seen_at=T0 - timedelta(seconds=1), reasons=["like", "follow", "like"])
+    assert await bs.unread_count(_ctx(view)) == {"count": 0}
+
+
+async def test_unread_count_skips_scan_when_nothing_unread():
+    view = FakeAppView(5, seen_at=T0 + timedelta(hours=1))
+    assert await bs.unread_count(_ctx(view)) == {"count": 0}
+    assert view.unread_count_calls == 1
+    assert view.list_calls == 0
+
+
+async def test_unread_count_reasons_override():
+    view = FakeAppView(len(MIXED), seen_at=T0 - timedelta(seconds=1), reasons=MIXED)
+    assert await bs.unread_count(_ctx(view), reasons=["like", "follow"]) == {"count": 4}
