@@ -108,7 +108,7 @@ async def create_custom_tool(
 
 @TOOL_REGISTRY.tool(
     name="custom_tools.update_custom_tool",
-    description="Update an existing custom tool. If code or parameters change, approval will be reset.",
+    description="Update an existing custom tool. If code or parameters change, or new secrets are added, approval will be reset.",
     parameters=[
         ToolParameter(
             name="name",

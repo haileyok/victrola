@@ -25,20 +25,23 @@ jobs:
         with:
           deno-version: v1.42.4
 
+      - name: Set up uv
+        # setup-uv publishes exact version tags only (no floating "v10").
+        uses: astral-sh/setup-uv@v10.2.0
+
+      # Install from uv.lock (like the Dockerfile) so CI tests the exact
+      # dependency versions we ship, not whatever pip resolves today.
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e .
-          pip install pytest pytest-asyncio
+        run: uv sync --frozen --extra dev
 
       # web.save_url_as_pdf renders pages with headless Chromium via Playwright;
       # install the browser + its OS deps so the render tests actually run.
       - name: Install Playwright Chromium
-        run: python -m playwright install --with-deps chromium
+        run: uv run --frozen playwright install --with-deps chromium
 
       - name: Run tests
         run: |
-          python -m pytest tests/ -v
+          uv run --frozen python -m pytest tests/ -v
 
   ui-test:
     runs-on: ubuntu-latest

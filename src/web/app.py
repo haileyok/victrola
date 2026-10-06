@@ -32,24 +32,58 @@ _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 # access works. The configured bind host is added, plus any extra hostnames the
 # operator lists in WEB_ALLOWED_HOSTS (e.g. a Tailscale host) for cases where
 # the bind is 0.0.0.0 but browsers reach the server via a non-loopback name.
+# Lowercased because urlparse().hostname always lowercases.
 _EXTRA_HOSTS = {
-    h.strip() for h in CONFIG.web_allowed_hosts.split(",") if h.strip()
+    h.strip().lower() for h in CONFIG.web_allowed_hosts.split(",") if h.strip()
 }
-_ALLOWED_HOSTS = {"localhost", "127.0.0.1", "::1", CONFIG.web_host} | _EXTRA_HOSTS
+_ALLOWED_HOSTS = {
+    "localhost", "127.0.0.1", "::1", CONFIG.web_host.lower()
+} | _EXTRA_HOSTS
+
+
+def _host_header_hostname(host: str | None) -> str | None:
+    """Extract the hostname from a Host header value, or None if malformed.
+
+    Handles ports and bracketed IPv6 literals (``[::1]:8000`` -> ``::1``),
+    which a naive ``split(":")`` gets wrong.
+    """
+    if not host:
+        return None
+    try:
+        return urlparse(f"//{host}").hostname
+    except ValueError:
+        return None
 
 
 class CsrfMiddleware(BaseHTTPMiddleware):
-    """Reject cross-origin state-changing requests.
+    """Reject requests from untrusted hosts and cross-origin state changes.
 
-    Only same-origin requests (Origin hostname matching the configured bind host
-    or a loopback address) are permitted on unsafe methods. A malicious website
-    the operator visits could otherwise submit cross-origin POSTs to e.g.
-    /api/tools/<name>/approve. This middleware blocks that by checking the Origin
-    header on unsafe methods — if present, the hostname must be in _ALLOWED_HOSTS.
+    Two checks, both against _ALLOWED_HOSTS:
+
+    1. Host header, on every request (DNS rebinding defense). A malicious
+       website can re-point its own domain at this server's address; the
+       browser then treats the server as same-origin with the attacker's page
+       and lets it *read* responses (sessions, memory, workspace files). The
+       Host header still carries the attacker's domain in that case, so
+       rejecting unknown Host values blocks it.
+
+    2. Origin header, on unsafe methods (CSRF defense). A malicious website the
+       operator visits could otherwise submit cross-origin POSTs to e.g.
+       /api/tools/<name>/approve. If Origin is present, its hostname must be
+       allowed. Requests without Origin (non-browser clients) pass.
+
     We use urlparse to avoid prefix-matching bypasses like http://localhost.evil.com.
     """
 
     async def dispatch(self, request: Request, call_next):
+        if _host_header_hostname(request.headers.get("host")) not in _ALLOWED_HOSTS:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": "Host not allowed. Add this hostname to "
+                    "WEB_ALLOWED_HOSTS if you access Victrola through it."
+                },
+            )
         if request.method in _UNSAFE_METHODS:
             origin = request.headers.get("origin")
             if origin:
