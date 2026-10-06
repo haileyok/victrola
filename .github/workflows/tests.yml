@@ -26,7 +26,8 @@ jobs:
           deno-version: v1.42.4
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10
+        # setup-uv publishes exact version tags only (no floating "v10").
+        uses: astral-sh/setup-uv@v10.2.0
 
       # Install from uv.lock (like the Dockerfile) so CI tests the exact
       # dependency versions we ship, not whatever pip resolves today.
