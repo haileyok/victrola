@@ -74,9 +74,9 @@ export function SecretsView() {
                   key={s.name}
                   className="group flex items-center justify-between rounded-md px-3 py-2.5 hover:bg-accent"
                 >
-                  <div className="flex items-center gap-3">
-                    <code className="text-sm font-medium">{s.name}</code>
-                    <span className="text-sm text-muted-foreground">{s.masked_value}</span>
+                  <div className="flex min-w-0 items-center gap-3">
+                    <code className="truncate text-sm font-medium">{s.name}</code>
+                    <span className="truncate text-sm text-muted-foreground">{s.masked_value}</span>
                   </div>
                   <Button
                     variant="ghost"

@@ -82,7 +82,8 @@
     .hover-reveal {
       opacity: 0;
     }
-    .group:hover .hover-reveal {
+    .group:hover .hover-reveal,
+    .group:focus-within .hover-reveal {
       opacity: 1;
     }
   }

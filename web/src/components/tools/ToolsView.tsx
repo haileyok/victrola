@@ -83,8 +83,8 @@ export function ToolsView() {
                   className="group flex cursor-pointer items-center gap-3 rounded-md px-3 py-2.5 hover:bg-accent"
                 >
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium">{t.name}</span>
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className="truncate text-sm font-medium">{t.name}</span>
                       {t.approved ? (
                         <Badge className="bg-green-600 text-white">approved</Badge>
                       ) : (

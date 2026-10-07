@@ -122,7 +122,7 @@ export function ToolDetail() {
         <Button variant="ghost" size="icon" onClick={() => navigate("/tools")}>
           <ArrowLeft className="h-4 w-4" />
         </Button>
-        <h2 className="text-lg font-semibold">{tool.name}</h2>
+        <h2 className="min-w-0 break-words text-lg font-semibold">{tool.name}</h2>
         {tool.approved ? (
           <Badge className="bg-green-600 text-white">approved</Badge>
         ) : (

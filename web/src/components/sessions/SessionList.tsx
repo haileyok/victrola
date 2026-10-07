@@ -39,6 +39,7 @@ export function SessionList() {
 
   const handleDelete = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
+    if (!confirm("Delete this session?")) return;
     try {
       await api.deleteSession(id);
       setSessions((prev) => prev.filter((s) => s.rkey !== id));
@@ -102,7 +103,7 @@ export function SessionList() {
                     className="h-7 w-7 hover-reveal shrink-0"
                     onClick={(e) => handleDelete(e, s.rkey)}
                   >
-                    <Trash2 className="h-3.5 w-3.5" />
+                    <Trash2 className="h-3.5 w-3.5 text-red-500" />
                   </Button>
                 </div>
               ))}

@@ -224,7 +224,7 @@ export function SchedulesView() {
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-sm font-medium">{s.name}</span>
+                      <span className="min-w-0 truncate text-sm font-medium">{s.name}</span>
                       {s.enabled ? (
                         <Badge className="bg-green-600 text-white">enabled</Badge>
                       ) : (
