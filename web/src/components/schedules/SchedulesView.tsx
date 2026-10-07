@@ -259,7 +259,7 @@ export function SchedulesView() {
                       </div>
                     )}
                   </div>
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100">
+                  <div className="flex items-center gap-1 hover-reveal shrink-0">
                     {s.condition_code && (
                       <>
                         <Button

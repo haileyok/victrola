@@ -17,19 +17,20 @@ describe("Layout", () => {
     expect(screen.getByText("Victrola")).toBeInTheDocument();
   });
 
-  it("renders all nav items", () => {
+  it("renders all nav items in both desktop and mobile navs", () => {
     renderLayout();
-    expect(screen.getByText("Sessions")).toBeInTheDocument();
-    expect(screen.getByText("Tools")).toBeInTheDocument();
-    expect(screen.getByText("Secrets")).toBeInTheDocument();
-    expect(screen.getByText("Schedules")).toBeInTheDocument();
-    expect(screen.getByText("Prompt")).toBeInTheDocument();
+    // The layout renders a desktop sidebar and a mobile top bar, so each
+    // label appears twice.
+    for (const label of ["Sessions", "Tools", "Secrets", "Schedules", "Prompt"]) {
+      expect(screen.getAllByText(label)).toHaveLength(2);
+    }
   });
 
   it("highlights active nav item", () => {
     renderLayout("/secrets");
-    const secretsLink = screen.getByText("Secrets").closest("a");
-    expect(secretsLink).toHaveClass("bg-accent");
+    for (const secretsLink of screen.getAllByText("Secrets").map((el) => el.closest("a"))) {
+      expect(secretsLink).toHaveClass("bg-accent");
+    }
   });
 
   it("renders child routes via Outlet", () => {

@@ -71,3 +71,19 @@
 ::-webkit-scrollbar-thumb:hover {
   background: hsl(var(--muted-foreground) / 0.5);
 }
+
+/* Actions hidden until the parent .group is hovered on desktop stay visible on
+   touch devices, where hover is unavailable. */
+@layer utilities {
+  .hover-reveal {
+    opacity: 1;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .hover-reveal {
+      opacity: 0;
+    }
+    .group:hover .hover-reveal {
+      opacity: 1;
+    }
+  }
+}

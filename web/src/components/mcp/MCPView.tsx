@@ -131,7 +131,7 @@ export function MCPView() {
                       {s.tools_approved}/{s.tools_total} tools approved
                     </div>
                   </div>
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100">
+                  <div className="flex items-center gap-1 hover-reveal shrink-0">
                     <Button variant="ghost" size="icon" className="h-7 w-7" onClick={(e) => handleDelete(e, s.name)}>
                       <Trash2 className="h-3.5 w-3.5 text-red-500" />
                     </Button>

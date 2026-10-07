@@ -247,7 +247,7 @@ export function WorkspaceView() {
                     <Button
                       variant="ghost"
                       size="icon"
-                      className="h-7 w-7 opacity-0 group-hover:opacity-100"
+                      className="h-7 w-7 hover-reveal shrink-0"
                       onClick={(e) => {
                         e.stopPropagation();
                         handleDelete(entry);

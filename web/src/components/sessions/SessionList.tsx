@@ -99,7 +99,7 @@ export function SessionList() {
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="h-7 w-7 opacity-0 group-hover:opacity-100"
+                    className="h-7 w-7 hover-reveal shrink-0"
                     onClick={(e) => handleDelete(e, s.rkey)}
                   >
                     <Trash2 className="h-3.5 w-3.5" />

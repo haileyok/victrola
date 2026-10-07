@@ -17,8 +17,8 @@ export function Layout() {
   const location = useLocation();
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden">
-      <aside className="flex w-56 flex-col border-r border-border bg-card">
+    <div className="flex h-dvh w-full overflow-hidden">
+      <aside className="hidden w-56 flex-col border-r border-border bg-card md:flex">
         <div className="px-4 py-3">
           <h1 className="text-lg font-bold tracking-tight">Victrola</h1>
         </div>
@@ -43,9 +43,31 @@ export function Layout() {
           })}
         </nav>
       </aside>
-      <main className="flex-1 overflow-hidden">
-        <Outlet />
-      </main>
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <nav className="flex items-center gap-1 overflow-x-auto border-b border-border bg-card px-2 py-2 md:hidden">
+          {navItems.map((item) => {
+            const active = location.pathname.startsWith(item.to);
+            return (
+              <Link
+                key={item.to}
+                to={item.to}
+                className={cn(
+                  "flex shrink-0 items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium",
+                  active
+                    ? "bg-accent text-accent-foreground"
+                    : "text-muted-foreground",
+                )}
+              >
+                <item.icon className="h-4 w-4" />
+                {item.label}
+              </Link>
+            );
+          })}
+        </nav>
+        <main className="min-w-0 flex-1 overflow-hidden">
+          <Outlet />
+        </main>
+      </div>
     </div>
   );
 }
