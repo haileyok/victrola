@@ -10,7 +10,7 @@ dependencies = [
     "click>=8.3.1",
     "discord.py>=2.4.0",
     # Memory spaces on ATProto: the Python client in the engram-garden repo.
-    "engram-garden @ git+https://github.com/haileyok/engram-garden@2033e17#subdirectory=python",
+    "engram-garden @ git+https://github.com/haileyok/engram-garden@83174b7#subdirectory=python",
     "exa-py>=2.3.0",
     "fastapi>=0.115.0",
     "httpx>=0.28.0",

@@ -466,7 +466,7 @@ wheels = [
 [[package]]
 name = "engram-garden"
 version = "0.1.0"
-source = { git = "https://github.com/haileyok/engram-garden?subdirectory=python&rev=2033e17#2033e17fac7ba61913080a9700edf7527f21f859" }
+source = { git = "https://github.com/haileyok/engram-garden?subdirectory=python&rev=83174b7#83174b7ade397a9b44d762af2ad34019adc20d37" }
 dependencies = [
     { name = "cryptography" },
     { name = "httpx" },
@@ -1743,7 +1743,7 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.77.1" },
     { name = "click", specifier = ">=8.3.1" },
     { name = "discord-py", specifier = ">=2.4.0" },
-    { name = "engram-garden", git = "https://github.com/haileyok/engram-garden?subdirectory=python&rev=2033e17" },
+    { name = "engram-garden", git = "https://github.com/haileyok/engram-garden?subdirectory=python&rev=83174b7" },
     { name = "exa-py", specifier = ">=2.3.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.28.0" },
