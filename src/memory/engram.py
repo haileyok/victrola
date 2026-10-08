@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -44,6 +45,12 @@ MAX_TEXT_BYTES = 29000
 PUSH_TIMEOUT = 30.0
 #: Stop a flush after this many failures in a row (the space is probably down).
 MAX_CONSECUTIVE_FAILURES = 3
+#: A search of the space gives up after this long, and after any failure the
+#: space isn't searched for SEARCH_BACKOFF seconds (recall falls back to local
+#: vectors), so a down or not-yet-approved appview costs one slow turn, not all.
+SEARCH_TIMEOUT = 10.0
+SEARCH_BACKOFF = 60.0
+SEARCH_PAUSED = "memory space search paused"
 
 SPACE_CONFIG_KEY = "engram_space_uri"
 DEFAULT_SPACE_NAME = "memory"
@@ -100,6 +107,8 @@ class EngramSync:
         self.space = space
         self._lock = asyncio.Lock()
         self.last_error = ""
+        self._search_blocked_until = 0.0
+        self._search_block_reason = ""
 
     @property
     def did(self) -> str:
@@ -263,7 +272,11 @@ class EngramSync:
                 raise
             except Exception as e:  # noqa: BLE001
                 self.last_error = str(e)
-                logger.warning("Engram sync failed: %s", e)
+                if "UnknownSpace" in str(e):
+                    # Not an error to repeat: the space's owner hasn't approved the appview yet.
+                    logger.info("Engram: the appview doesn't index the memory space yet (run engram-setup for the approval link)")
+                else:
+                    logger.warning("Engram sync failed: %s", e)
             await asyncio.sleep(interval)
 
     # -- search --
@@ -273,8 +286,18 @@ class EngramSync:
     ) -> list[dict[str, Any]]:
         """Vector search in the space, as [{id, score}] with local ids (best first).
         Memories the space has but this machine doesn't are added locally first."""
+        if time.monotonic() < self._search_blocked_until:
+            raise EngramError(f"{SEARCH_PAUSED} ({self._search_block_reason})")
         tags = [_clip_bytes(SCOPE_PREFIX + scope, MAX_TAG_BYTES)] if scope else None
-        found = await self.spaces.recall(query, limit=min(max(limit, 1), 50), tags=tags, space=self.space)
+        try:
+            found = await asyncio.wait_for(
+                self.spaces.recall(query, limit=min(max(limit, 1), 50), tags=tags, space=self.space),
+                SEARCH_TIMEOUT,
+            )
+        except Exception as e:  # noqa: BLE001
+            self._search_blocked_until = time.monotonic() + SEARCH_BACKOFF
+            self._search_block_reason = str(e) or type(e).__name__
+            raise
         ids = await self._ms.ids_by_engram_uri([m.uri for m in found.memories])
         out: list[dict[str, Any]] = []
         for m in found.memories:

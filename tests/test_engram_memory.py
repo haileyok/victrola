@@ -389,3 +389,60 @@ async def test_without_a_space_search_is_unchanged(env):
     spaces.calls.clear()
     out = await engine.search("local only search", limit=3)
     assert out[0]["id"] == a["id"] and "recall" not in spaces.calls
+
+
+# ---- a down or unapproved appview ----
+
+
+async def test_a_failing_search_pauses_searching_the_space_then_resumes(env, monkeypatch):
+    store, spaces, sync, engine = env
+    a = await add(store, "gardening schedule for spring")
+    spaces.fail = True
+    spaces.calls.clear()
+    assert (await engine.search("gardening schedule", limit=3))[0]["id"] == a["id"]  # local fallback
+    assert (await engine.search("gardening schedule", limit=3))[0]["id"] == a["id"]
+    assert spaces.calls.count("recall") == 1  # the second search didn't ask the space
+    spaces.fail = False
+    monkeypatch.setattr(sync, "_search_blocked_until", 0.0)
+    await engine.search("gardening schedule", limit=3)
+    assert spaces.calls.count("recall") == 2
+    assert sync._search_block_reason == "the space is down"
+
+
+async def test_a_hung_search_times_out(env, monkeypatch):
+    import asyncio
+
+    import src.memory.engram as engram_mod
+
+    store, spaces, sync, engine = env
+    a = await add(store, "slow appview test entry")
+
+    async def hang(*args, **kw):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(spaces, "recall", hang)
+    monkeypatch.setattr(engram_mod, "SEARCH_TIMEOUT", 0.05)
+    out = await engine.search("slow appview", limit=3)
+    assert out and out[0]["id"] == a["id"]
+
+
+async def test_the_sync_loop_survives_an_unindexed_space(env):
+    import asyncio
+
+    store, spaces, sync, _ = env
+
+    async def unknown(*a, **kw):
+        raise eg.EngramError("UnknownSpace: this service does not index that space")
+
+    spaces.list = unknown
+    spaces.fail = True
+    e = await add(store, "pushed even though the appview can't list yet")
+    spaces.fail = False
+    assert await store.memory.get_engram_uri(e["id"]) is None
+    task = asyncio.create_task(sync.run(0.01))
+    await asyncio.sleep(0.1)
+    assert not task.done()  # the loop outlived the failing pull
+    task.cancel()
+    # flush ran before the pull failed, so the entry made it to the space
+    assert await store.memory.get_engram_uri(e["id"]) is not None
+    assert "UnknownSpace" in sync.last_error

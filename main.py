@@ -508,8 +508,14 @@ def engram_sync(limit: int):
                 else:
                     done = await sync.flush(progress=print)
                 print(f"pushed: {done}")
-                added = await sync.pull()
-                print(f"pulled {added} entries from the space; {await store.memory.count_unpushed()} still to push")
+                try:
+                    added = await sync.pull()
+                    print(f"pulled {added} entries from the space; {await store.memory.count_unpushed()} still to push")
+                except Exception as e:  # noqa: BLE001
+                    print(f"couldn't read the space back: {e}")
+                    if "UnknownSpace" in str(e):
+                        print("(the appview isn't indexing it yet: run `main.py engram-setup` for the approval link)")
+                    print(f"{await store.memory.count_unpushed()} still to push")
                 if sync.last_error:
                     print(f"last error: {sync.last_error}")
             finally:

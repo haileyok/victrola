@@ -154,7 +154,10 @@ class SearchEngine:
                 query, limit=min(100, limit * 5) if (type_filter or tags) else limit, scope=scope
             )
         except Exception as e:  # noqa: BLE001 - a down space must not break recall
-            logger.warning("Memory space search failed; using local vectors: %s", e)
+            # The space pauses its own search after a failure; only the first is news.
+            (logger.debug if "search paused" in str(e) else logger.warning)(
+                "Memory space search failed; using local vectors: %s", e
+            )
             return await self._vector_search(query, type_filter, scope, tags, limit)
         if type_filter or tags:
             found = await self._filter_found(found, type_filter, tags)
