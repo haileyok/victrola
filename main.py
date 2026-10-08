@@ -431,10 +431,93 @@ async def _init_memory(executor: ToolExecutor, agent: Agent) -> None:
         recall_service = RecallService(search_engine=executor.ctx.search_engine)
         agent.memory_recall = recall_service.recall
 
+    # 3. Long-term memory in the agent's Engram space (if one is configured)
+    executor.start_engram()
+
 
 @click.group()
 def cli():
     pass
+
+
+async def _engram_cli_context():
+    """Store, secrets and embedding client for the engram-* commands (no server)."""
+    from pathlib import Path
+
+    from src.memory.embeddings import EmbeddingClient
+    from src.store.store import Store
+    from src.tools.secrets import SecretManager
+
+    data_dir = Path(CONFIG.data_dir)
+    store = Store(path=data_dir / "store.db")
+    await store.initialize()
+    store.memory.set_embedding_client(
+        EmbeddingClient(CONFIG.embedding_endpoint, CONFIG.embedding_model, CONFIG.embedding_dimensions),
+        dimensions=CONFIG.embedding_dimensions,
+    )
+    secrets = SecretManager(path=data_dir / "secrets.json")
+    await secrets.load_secrets()
+    return store, secrets
+
+
+@cli.command(name="engram-setup")
+@click.option("--name", default="memory", show_default=True, help="the space's name (its key)")
+def engram_setup(name: str):
+    """Create the agent's memory space on her account and declare its embedding model."""
+    from src.memory.engram import setup_space
+
+    async def run():
+        store, secrets = await _engram_cli_context()
+        try:
+            r = await setup_space(store, secrets, name)
+        finally:
+            await store.close()
+        print(f"space:    {r['uri']}" + ("  (created)" if r["created"] else "  (already existed)"))
+        print(f"account:  {r['account']}")
+        m = r["model"]
+        print(f"model:    {m.model} ({m.dims} dims, {m.model_digest[:19]}…)" + ("  (declared now)" if r["model_declared_now"] else ""))
+        print(f"indexing: {r['indexing'] or 'unknown'}")
+        if r["grant_link"]:
+            print("\nThe appview can't read the space yet, so searches return nothing. Open this link in a")
+            print("browser, signed in as the agent's account, and approve:\n")
+            print(f"  {r['grant_link']}\n")
+        print("Next: `uv run python main.py engram-sync` copies the existing memories into the space.")
+
+    asyncio.run(run())
+
+
+@cli.command(name="engram-sync")
+@click.option("--limit", type=int, default=0, help="push at most this many entries (0 = all)")
+def engram_sync(limit: int):
+    """Push memories not yet in the memory space (all of them, the first time), then pull any it has that we don't."""
+    from src.memory.engram import open_sync
+
+    async def run():
+        store, secrets = await _engram_cli_context()
+        try:
+            sync = await open_sync(store, secrets)
+            if sync is None:
+                raise click.ClickException("no memory space configured: run `main.py engram-setup` first")
+            try:
+                before = await store.memory.count_unpushed()
+                print(f"{before} entries to push")
+                if limit:
+                    for e in await store.memory.get_unpushed(limit):
+                        await sync.after_add(e["id"])
+                    done = {"pushed": "up to --limit"}
+                else:
+                    done = await sync.flush(progress=print)
+                print(f"pushed: {done}")
+                added = await sync.pull()
+                print(f"pulled {added} entries from the space; {await store.memory.count_unpushed()} still to push")
+                if sync.last_error:
+                    print(f"last error: {sync.last_error}")
+            finally:
+                await sync.aclose()
+        finally:
+            await store.close()
+
+    asyncio.run(run())
 
 
 @cli.command()

@@ -181,6 +181,73 @@ class ToolExecutor:
         self._mcp_manager: Any | None = None
         self._secret_manager: Any | None = None
         self._scheduler: Any | None = None
+        self._engram: Any | None = None
+        self._engram_task: asyncio.Task | None = None
+
+    # -- Engram memory space --
+
+    def start_engram(self) -> None:
+        """Connect the agent's memory space in the background and keep it in sync.
+
+        Does nothing when no space is configured. If signing in fails (the PDS is
+        down, say), it keeps trying; memory works locally meanwhile and anything
+        written is pushed once the space is reachable."""
+        store = self._ctx._store
+        if store is None or store.memory is None or self._engram_task is not None:
+            return
+        self._engram_task = asyncio.create_task(self._run_engram(), name="engram-sync")
+
+    async def _run_engram(self) -> None:
+        from src.config import CONFIG
+        from src.memory.engram import open_sync, space_uri
+
+        store = self._ctx._store
+        try:
+            if not await space_uri(store):
+                return
+            delay = 15.0
+            while True:
+                try:
+                    sync = await open_sync(store, self._secret_manager)
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("Memory space unavailable (%s); retrying in %ds", e, delay)
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 600.0)
+            if sync is None:
+                return
+            self._engram = sync
+            if self._ctx._search_engine is not None:
+                self._ctx._search_engine.set_engram(sync)
+            logger.info("Memory space connected: %s", sync.space and await space_uri(store))
+            if CONFIG.engram_sync_interval_seconds > 0:
+                await sync.run(CONFIG.engram_sync_interval_seconds)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Memory space sync stopped")
+
+    async def _stop_engram(self) -> None:
+        if self._engram_task is not None:
+            self._engram_task.cancel()
+            try:
+                await self._engram_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            self._engram_task = None
+        if self._engram is not None:
+            if self._ctx._search_engine is not None:
+                self._ctx._search_engine.set_engram(None)
+            store = self._ctx._store
+            if store is not None and store.memory is not None:
+                store.memory.set_engram(None)
+            try:
+                await self._engram.aclose()
+            except Exception:  # noqa: BLE001
+                logger.warning("Error closing the memory space client", exc_info=True)
+            self._engram = None
 
     # -- public read-only properties for web/Discord/main.py --
 
@@ -322,6 +389,7 @@ class ToolExecutor:
 
     async def aclose(self) -> None:
         """Close resources held by the executor (embedding client HTTP connection)."""
+        await self._stop_engram()
         if self._mcp_manager is not None:
             try:
                 await self._mcp_manager.disconnect_all()

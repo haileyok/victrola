@@ -203,6 +203,27 @@ class Store:
                 "ALTER TABLE chat_sessions ADD COLUMN compacted_up_to_msg_id INTEGER DEFAULT NULL"
             )
 
+        # Engram memory space: episodic/factual entries are canonical in the
+        # agent's space (src/memory/engram.py). `engram_uri` links a local
+        # row to its record there; NULL means "not pushed yet". Deletes that
+        # couldn't reach the space wait in engram_tombstones to be retried.
+        cur = await self._db.execute("PRAGMA table_info(memory_entries)")
+        mem_columns = [row[1] for row in await cur.fetchall()]
+        if "engram_uri" not in mem_columns:
+            await self._db.execute(
+                "ALTER TABLE memory_entries ADD COLUMN engram_uri TEXT DEFAULT NULL"
+            )
+        await self._db.executescript(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS memory_entries_by_engram_uri
+                ON memory_entries(engram_uri) WHERE engram_uri IS NOT NULL;
+            CREATE TABLE IF NOT EXISTS engram_tombstones (
+                uri TEXT PRIMARY KEY,
+                deleted_at TEXT NOT NULL
+            );
+            """
+        )
+
 class DocumentStore:
     """Agent documents: flat rkey -> content.
 

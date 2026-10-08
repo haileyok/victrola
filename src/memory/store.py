@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 # Valid memory types
 _VALID_TYPES = {"self", "operator", "skill", "episodic", "factual"}
 
+# Types kept in the agent's Engram memory space (src/memory/engram.py). The rest
+# (self, operator, skill) are loaded into the system prompt and stay local.
+ENGRAM_TYPES = frozenset({"episodic", "factual"})
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -46,6 +50,16 @@ class MemoryStore:
         self._embedding_client: Any | None = None
         self._embedding_dimensions: int = 768
         self._write_lock = write_lock or asyncio.Lock()
+        self._engram: Any | None = None
+
+    def set_engram(self, engram: Any | None) -> None:
+        """Attach the Engram sync (src/memory/engram.py), or detach it with None.
+
+        With it, episodic/factual writes are pushed to the memory space after
+        the local commit. A failed push never fails the write: the row stays
+        unpushed and the sync retries it.
+        """
+        self._engram = engram
 
     def set_embedding_client(self, client: Any | None, dimensions: int = 768) -> None:
         """Set the embedding client used for auto-generating embeddings on write."""
@@ -126,7 +140,10 @@ class MemoryStore:
             (row_id,),
         )
         row = await cur.fetchone()
-        return self._row_to_dict(row)
+        result = self._row_to_dict(row)
+        if self._engram is not None and type in ENGRAM_TYPES:
+            await self._engram.after_add(result["id"])
+        return result
 
     async def update_entry(
         self,
@@ -144,7 +161,7 @@ class MemoryStore:
         # Step 1: short locked read of current values
         async with self._write_lock:
             cur = await self._db.execute(
-                "SELECT content, metadata FROM memory_entries WHERE id = ?",
+                "SELECT content, metadata, type, engram_uri FROM memory_entries WHERE id = ?",
                 (id,),
             )
             row = await cur.fetchone()
@@ -153,6 +170,7 @@ class MemoryStore:
 
             current_content = row[0]
             current_meta = row[1]
+            entry_type = row[2]
 
         # Step 2: compute new values and regenerate embedding OUTSIDE the
         # lock so a slow embed doesn't block all other store writes.
@@ -202,10 +220,23 @@ class MemoryStore:
                 await self._db.rollback()
                 raise
 
+        if (
+            self._engram is not None
+            and entry_type in ENGRAM_TYPES
+            and (content is not None or metadata is not None)
+        ):
+            await self._engram.after_update(id)
         return await self.get_entry(id)
 
     async def delete_entry(self, id: int) -> bool:
         """Delete a single entry by ID. Returns True if deleted, False if not found."""
+        engram_uri: str | None = None
+        if self._engram is not None:
+            cur = await self._db.execute(
+                "SELECT engram_uri FROM memory_entries WHERE id = ?", (id,)
+            )
+            found = await cur.fetchone()
+            engram_uri = found[0] if found else None
         async with self._write_lock:
             try:
                 await self._db.execute("BEGIN IMMEDIATE")
@@ -219,7 +250,127 @@ class MemoryStore:
             except Exception:
                 await self._db.rollback()
                 raise
+        if engram_uri and self._engram is not None:
+            await self._engram.after_delete(engram_uri)
         return True
+
+    # -- Engram bookkeeping --
+
+    _ROW_COLS = "id, type, scope, content, metadata, embedding, created_at, updated_at"
+
+    async def get_engram_uri(self, id: int) -> str | None:
+        cur = await self._db.execute(
+            "SELECT engram_uri FROM memory_entries WHERE id = ?", (id,)
+        )
+        row = await cur.fetchone()
+        return row[0] if row else None
+
+    async def set_engram_uri(self, id: int, uri: str | None) -> None:
+        async with self._write_lock:
+            await self._db.execute("BEGIN IMMEDIATE")
+            try:
+                await self._db.execute(
+                    "UPDATE memory_entries SET engram_uri = ? WHERE id = ?", (uri, id)
+                )
+                await self._db.commit()
+            except Exception:
+                await self._db.rollback()
+                raise
+
+    async def get_unpushed(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Episodic/factual entries not yet in the memory space, oldest first."""
+        cur = await self._db.execute(
+            f"SELECT {self._ROW_COLS} FROM memory_entries "
+            "WHERE engram_uri IS NULL AND type IN ('episodic', 'factual') "
+            "ORDER BY id LIMIT ?",
+            (limit,),
+        )
+        return [self._row_to_dict(r) for r in await cur.fetchall()]
+
+    async def count_unpushed(self) -> int:
+        cur = await self._db.execute(
+            "SELECT COUNT(*) FROM memory_entries "
+            "WHERE engram_uri IS NULL AND type IN ('episodic', 'factual')"
+        )
+        return (await cur.fetchone())[0]
+
+    async def ids_by_engram_uri(self, uris: list[str]) -> dict[str, int]:
+        if not uris:
+            return {}
+        marks = ",".join("?" * len(uris))
+        cur = await self._db.execute(
+            f"SELECT engram_uri, id FROM memory_entries WHERE engram_uri IN ({marks})", uris
+        )
+        return {r[0]: r[1] for r in await cur.fetchall()}
+
+    async def known_engram_uris(self) -> set[str]:
+        cur = await self._db.execute(
+            "SELECT engram_uri FROM memory_entries WHERE engram_uri IS NOT NULL"
+        )
+        return {r[0] for r in await cur.fetchall()}
+
+    async def unpushed_ids(self) -> list[int]:
+        cur = await self._db.execute(
+            "SELECT id FROM memory_entries "
+            "WHERE engram_uri IS NULL AND type IN ('episodic', 'factual')"
+        )
+        return [r[0] for r in await cur.fetchall()]
+
+    async def add_tombstone(self, uri: str) -> None:
+        async with self._write_lock:
+            await self._db.execute("BEGIN IMMEDIATE")
+            try:
+                await self._db.execute(
+                    "INSERT OR IGNORE INTO engram_tombstones (uri, deleted_at) VALUES (?, ?)",
+                    (uri, _now()),
+                )
+                await self._db.commit()
+            except Exception:
+                await self._db.rollback()
+                raise
+
+    async def list_tombstones(self) -> list[str]:
+        cur = await self._db.execute("SELECT uri FROM engram_tombstones ORDER BY deleted_at")
+        return [r[0] for r in await cur.fetchall()]
+
+    async def clear_tombstone(self, uri: str) -> None:
+        async with self._write_lock:
+            await self._db.execute("BEGIN IMMEDIATE")
+            try:
+                await self._db.execute("DELETE FROM engram_tombstones WHERE uri = ?", (uri,))
+                await self._db.commit()
+            except Exception:
+                await self._db.rollback()
+                raise
+
+    async def ingest_remote(
+        self,
+        type: str,
+        scope: str,
+        content: str,
+        metadata: dict[str, Any],
+        created_at: str,
+        engram_uri: str,
+    ) -> int | None:
+        """Add a row for a memory that exists in the space but not here, without
+        pushing it back. Returns its id, or None if the URI is already known.
+        Its embedding is filled in later by backfill_embeddings."""
+        now = _now()
+        async with self._write_lock:
+            await self._db.execute("BEGIN IMMEDIATE")
+            try:
+                cur = await self._db.execute(
+                    "INSERT OR IGNORE INTO memory_entries "
+                    "(type, scope, content, metadata, embedding, created_at, updated_at, engram_uri) "
+                    "VALUES (?, ?, ?, ?, NULL, ?, ?, ?)",
+                    (type, scope, content, json.dumps(metadata), created_at or now, now, engram_uri),
+                )
+                row_id = cur.lastrowid if cur.rowcount else None
+                await self._db.commit()
+            except Exception:
+                await self._db.rollback()
+                raise
+        return row_id
 
     # -- read methods --
 

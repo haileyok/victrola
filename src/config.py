@@ -121,6 +121,15 @@ class Config(BaseSettings):
     embedding_dimensions: int = 768
     """dimensionality of the embedding model"""
 
+    # engram memory space (the agent's long-term memory on her own ATProto account)
+    engram_space_uri: str = ""
+    """at:// URI of the memory space. Empty: use the one `main.py engram-setup` saved,
+    or no space at all (memory stays local)."""
+    engram_appview_url: str = "https://api.engram.garden"
+    """the Engram appview that indexes the space and serves searches"""
+    engram_sync_interval_seconds: int = 300
+    """seconds between background syncs with the memory space (0 disables)"""
+
     # mcp
     mcp_health_check_interval_seconds: int = 120
     """seconds between background MCP connection health checks (0 disables)"""

@@ -34,6 +34,11 @@ class SearchEngine:
         self._vector_ids: list[int] | None = None  # row IDs aligned with cache
         self._vector_types: list[str] | None = None  # type per row, aligned with cache
         self._db: aiosqlite.Connection = store._db
+        self._engram: Any | None = None  # EngramSync: semantic search in the memory space
+
+    def set_engram(self, engram: Any | None) -> None:
+        """Take the vector half of search from the Engram memory space (None: local vectors)."""
+        self._engram = engram
 
     def invalidate_cache(self) -> None:
         """Mark the vector cache as stale. Called after writes."""
@@ -122,12 +127,81 @@ class SearchEngine:
         )
 
         # --- vector search ---
-        vector_results = await self._vector_search(
+        vector_results = await self._semantic_search(
             query, type_filter, scope, tags, limit
         )
 
         # --- merge ---
         return await self._merge_results(keyword_results, vector_results, limit)
+
+    async def _semantic_search(
+        self,
+        query: str,
+        type_filter: list[str] | None,
+        scope: str | None,
+        tags: list[str] | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """The vector half. With a memory space, that's the space's search plus
+        local vectors for entries not pushed to it yet; if the space can't be
+        reached, local vectors alone. Returns list of {id, score}."""
+        if self._engram is None:
+            return await self._vector_search(query, type_filter, scope, tags, limit)
+        try:
+            # Type and tag filters apply here, after mapping to local rows, so
+            # ask for more than `limit`.
+            found = await self._engram.semantic_search(
+                query, limit=min(100, limit * 5) if (type_filter or tags) else limit, scope=scope
+            )
+        except Exception as e:  # noqa: BLE001 - a down space must not break recall
+            logger.warning("Memory space search failed; using local vectors: %s", e)
+            return await self._vector_search(query, type_filter, scope, tags, limit)
+        if type_filter or tags:
+            found = await self._filter_found(found, type_filter, tags)
+        found = found[:limit]
+        # Entries that aren't in the space yet can only be found locally.
+        try:
+            pending = await self._store.unpushed_ids()
+            if pending:
+                local = await self._vector_search(
+                    query, type_filter, scope, tags, limit, only_ids=set(pending)
+                )
+                have = {r["id"] for r in found}
+                found += [r for r in local if r["id"] not in have]
+        except Exception:  # noqa: BLE001
+            logger.warning("Local vector search for unpushed entries failed", exc_info=True)
+        return found
+
+    async def _filter_found(
+        self,
+        found: list[dict[str, Any]],
+        type_filter: list[str] | None,
+        tags: list[str] | None,
+    ) -> list[dict[str, Any]]:
+        """Apply type and tag filters to results already mapped to local ids."""
+        if not found:
+            return found
+        ids = [r["id"] for r in found]
+        keep = set(ids)
+        marks = ",".join("?" * len(ids))
+        if type_filter:
+            tm = ",".join("?" * len(type_filter))
+            cur = await self._db.execute(
+                f"SELECT id FROM memory_entries WHERE id IN ({marks}) AND type IN ({tm})",
+                [*ids, *type_filter],
+            )
+            keep = keep.intersection(r[0] for r in await cur.fetchall())
+        if tags and keep:
+            keep_ids = sorted(keep)
+            km = ",".join("?" * len(keep_ids))
+            ors = " OR ".join(
+                "EXISTS (SELECT 1 FROM json_each(metadata, '$.tags') WHERE value = ?)" for _ in tags
+            )
+            cur = await self._db.execute(
+                f"SELECT id FROM memory_entries WHERE id IN ({km}) AND ({ors})", [*keep_ids, *tags]
+            )
+            keep = keep.intersection(r[0] for r in await cur.fetchall())
+        return [r for r in found if r["id"] in keep]
 
     async def _keyword_search(
         self,
@@ -206,8 +280,11 @@ class SearchEngine:
         scope: str | None,
         tags: list[str] | None,
         limit: int,
+        only_ids: set[int] | None = None,
     ) -> list[dict[str, Any]]:
-        """Vector cosine similarity search. Returns list of {id, score}."""
+        """Vector cosine similarity search. Returns list of {id, score}.
+
+        only_ids restricts the search to those entries."""
         if np is None or self._embedding_client is None:
             return []
 
@@ -241,6 +318,11 @@ class SearchEngine:
             type_set = set(type_filter)
             for i, t in enumerate(self._vector_types or []):
                 if t not in type_set:
+                    cache_mask[i] = False
+
+        if only_ids is not None:
+            for i, entry_id in enumerate(self._vector_ids):
+                if entry_id not in only_ids:
                     cache_mask[i] = False
 
         # Filter cache by scope/tags — need to query DB for these
