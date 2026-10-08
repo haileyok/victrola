@@ -118,6 +118,28 @@ Before each turn, the user's message is embedded and relevant `episodic` + `fact
 
 Embeddings are generated via a local Ollama instance using `nomic-embed-text` (768 dimensions). If Ollama isn't running, memory writes store NULL embeddings and searches fall back to keyword-only. Embeddings are backfilled automatically when Ollama becomes available.
 
+### Long-term memory in an Engram space (optional)
+
+`episodic` and `factual` entries can live in a memory space on the agent's own AT Protocol account, using [Engram Garden](https://github.com/haileyok/engram-garden). The agent doesn't see this: she keeps using `memory.add`, `search`, `update` and `delete`. `self`, `operator` and `skill` entries stay local, since they're loaded into the system prompt.
+
+How it works:
+
+- The space is canonical. The local table mirrors it, and keeps the integer ids the tools use, keyword search, the web UI, and writes the space couldn't take.
+- A write is pushed to the space right after the local commit. If the space is unreachable the write still succeeds; the entry is pushed by the background sync (every `ENGRAM_SYNC_INTERVAL_SECONDS`). Deletes that couldn't reach the space are retried the same way.
+- Engram has no update, so changing an entry writes the new record and deletes the old one. The local id doesn't change.
+- Search takes its vector half from the space (the appview searches the memories' own vectors, embedded locally with the space's declared model). Keyword search stays local. Entries not yet pushed are found with local vectors, and if the space can't be reached all vector search falls back to local; after a failure the space isn't searched for a minute, so recall isn't slowed down.
+- The sync also adds memories the space has that this machine doesn't (after a lost database, say). It never deletes local rows.
+- Entries become records with tags `type:<type>`, `scope:<scope>` and their own tags; the scope is also the record's `source`, and the original time is kept.
+
+Setup (needs the `ATPROTO_*` secrets from [AT Protocol](#at-protocol-optional), and Ollama with `nomic-embed-text`):
+
+```bash
+uv run python main.py engram-setup   # creates the space on the account, declares the model, prints an approval link
+uv run python main.py engram-sync    # copies existing episodic/factual memories into it (safe to re-run)
+```
+
+Open the approval link in a browser **signed in as the agent's account**; until you do, the appview can't index the space and searches use local vectors. Then restart. Settings: `ENGRAM_SPACE_URI` (overrides the space `engram-setup` saved), `ENGRAM_APPVIEW_URL` (default `https://api.engram.garden`), `ENGRAM_SYNC_INTERVAL_SECONDS` (default 300, 0 disables the background sync).
+
 ### Web UI
 
 Memory entries can also be managed through the web interface at `/memory`, which provides browse, search, create, edit, and delete alongside the `memory.*` agent tools.
