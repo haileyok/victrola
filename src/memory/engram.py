@@ -290,8 +290,12 @@ class EngramSync:
             raise EngramError(f"{SEARCH_PAUSED} ({self._search_block_reason})")
         tags = [_clip_bytes(SCOPE_PREFIX + scope, MAX_TAG_BYTES)] if scope else None
         try:
+            # Meaning only: keyword matching is the local half of the search
+            # (FTS5), and the scores are merged there. The space's own
+            # hybrid ranking would count keywords twice and its order would
+            # be lost in that merge.
             found = await asyncio.wait_for(
-                self.spaces.recall(query, limit=min(max(limit, 1), 50), tags=tags, space=self.space),
+                self.spaces.recall(query, limit=min(max(limit, 1), 50), tags=tags, space=self.space, mode="vector"),
                 SEARCH_TIMEOUT,
             )
         except Exception as e:  # noqa: BLE001
