@@ -31,6 +31,7 @@ class FakeSpaces:
         self.fail = False
         self.fail_forget = False
         self.calls: list[str] = []
+        self.recall_modes: list[str] = []
         self._n = 0
         self.client = type("C", (), {"did": ME})()
 
@@ -82,8 +83,9 @@ class FakeSpaces:
         nxt = str(start + len(page)) if start + len(page) < len(items) else ""
         return eg.MemoriesOut(memories=[self._memory(u, r) for u, r in page], cursor=nxt)
 
-    async def recall(self, query, limit=0, author="", tags=None, since="", space=""):
+    async def recall(self, query, limit=0, author="", tags=None, since="", space="", mode=""):
         self.calls.append("recall")
+        self.recall_modes.append(mode)
         self._check(self.fail)
         q = set(re.findall(r"\w+", query.lower()))
         scored = []
@@ -326,6 +328,16 @@ async def test_pull_pages(env):
 
 
 # ---- search ----
+
+
+async def test_search_asks_the_space_for_meaning_only(env):
+    # Keywords are matched locally; the space's hybrid ranking would count
+    # them twice.
+    store, spaces, _, engine = env
+    await add(store, "the staging cluster lives in us-east")
+    spaces.recall_modes.clear()
+    await engine.search("staging cluster", limit=5)
+    assert spaces.recall_modes == ["vector"]
 
 
 async def test_search_takes_its_vector_half_from_the_space(env):
