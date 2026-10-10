@@ -92,6 +92,44 @@ def _format_time(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+# Cap for the post text carried inside a compacted notification. The tool
+# result is capped at MAX_TOOL_RESULT_LENGTH (see src/agent/agent.py) before
+# the model sees it; keeping each notification small means a normal batch
+# arrives intact instead of truncated mid-JSON (a truncated payload invites
+# the model to reconstruct missing entries and act on invented records).
+_RECORD_TEXT_CAP = 400
+# Overall budget the compacted batch must fit in, comfortably below
+# MAX_TOOL_RESULT_LENGTH. When the batch (at the per-notification cap) would
+# exceed it, text is trimmed further, notification by notification, until it
+# fits — the batch itself is never silently cut mid-record.
+_BATCH_CHAR_BUDGET = 3500
+
+
+def _compact_record(record: Any) -> dict[str, Any] | None:
+    """Reduce a post record to the fields an agent needs to act on it.
+
+    Full records carry facets, embeds, lang tags and reply refs that dwarf the
+    useful part (the text). Keep the text capped, the timestamp, and the
+    reply refs (the agent needs the parent/root to place the reply in its
+    thread); drop everything else.
+    """
+    if not isinstance(record, dict):
+        return None
+    out: dict[str, Any] = {}
+    text = record.get("text")
+    if isinstance(text, str):
+        if len(text) > _RECORD_TEXT_CAP:
+            text = text[:_RECORD_TEXT_CAP] + "…"
+        out["text"] = text
+    for key in ("createdAt", "langs"):
+        if record.get(key):
+            out[key] = record[key]
+    reply = record.get("reply")
+    if isinstance(reply, dict):
+        out["reply"] = reply
+    return out or None
+
+
 def _compact(notif: dict[str, Any]) -> dict[str, Any]:
     """Keep the fields an agent needs; full views are large (avatars, labels, viewer state)."""
     author = notif.get("author") or {}
@@ -103,11 +141,35 @@ def _compact(notif: dict[str, Any]) -> dict[str, Any]:
             k: author[k] for k in ("did", "handle", "displayName") if author.get(k)
         },
         "indexed_at": notif.get("indexedAt"),
-        "record": notif.get("record"),
+        "record": _compact_record(notif.get("record")),
     }
     if notif.get("reasonSubject"):
         out["reason_subject"] = notif["reasonSubject"]
     return out
+
+
+def _fit_batch_texts(notifs: list[dict[str, Any]]) -> bool:
+    """Trim record texts (a prefix cut, so still truthful) until the rendered
+    batch fits the char budget. Returns whether it fits at the text floor.
+
+    The tool result is hard-capped downstream (MAX_TOOL_RESULT_LENGTH in
+    src/agent/agent.py) with a mid-payload cut; by fitting the batch here we
+    keep whole notifications intact instead — and a full record can always be
+    re-fetched from its uri.
+    """
+    cap = _RECORD_TEXT_CAP
+    while True:
+        for n in notifs:
+            rec = n.get("record") if isinstance(n, dict) else None
+            if (
+                isinstance(rec, dict)
+                and isinstance(rec.get("text"), str)
+                and len(rec["text"]) > cap
+            ):
+                rec["text"] = rec["text"][: cap - 1] + "…"
+        if len(str(notifs)) <= _BATCH_CHAR_BUDGET or cap <= 80:
+            return len(str(notifs)) <= _BATCH_CHAR_BUDGET
+        cap = int(cap * 0.7)
 
 
 async def _list_page(ctx: ToolContext, svc: NotificationService, cursor: str | None) -> dict[str, Any]:
@@ -237,16 +299,27 @@ async def fetch_notifications(
             default=None,
         )
 
+        compacted = [_compact(n) for n in batch]
+        batch_fits = _fit_batch_texts(compacted)
         result: dict[str, Any] = {
-            "notifications": [_compact(n) for n in batch],
+            "notifications": compacted,
             "more_unread": more_unread,
             "marked_read": False,
         }
+        notes: list[str] = []
+        if not batch_fits:
+            notes.append(
+                "Batch too large for the tool result even with capped record "
+                "text; use each notification's `uri` with atproto.get_record "
+                "for the full record."
+            )
         if older_unread_beyond_scan:
-            result["note"] = (
+            notes.append(
                 f"More than {_MAX_PAGES * _PAGE_SIZE} unread notifications; the oldest "
                 "beyond that were not returned and are now marked read."
             )
+        if notes:
+            result["note"] = " ".join(notes)
 
         if newest is None:
             result["mark_read_error"] = "notifications had no usable indexedAt timestamps"
@@ -306,11 +379,15 @@ def get_notifications_description(svc: NotificationService) -> str:
         "without being returned. If `more_unread` is true, newer matching "
         "unread notifications remain: call again to get the next batch. Each "
         "notification has `reason` (mention, reply, quote, ...), `uri`, `cid`, "
-        "`author`, `indexed_at`, `record` (the post's content), and "
-        "`reason_subject` (the at:// URI of your post it's about, for replies "
-        "and quotes). `marked_read` says whether the read marker was updated; "
-        "if `mark_read_error` is present, the notifications were returned but "
-        "NOT marked read. For read notifications or other filters, use "
+        "`author`, `indexed_at`, `record` (the post's text capped at ~600 "
+        "chars, plus `createdAt`, `langs` and `reply` refs — NOT the full "
+        "record), and `reason_subject` (the at:// URI of your post it's about, "
+        "for replies and quotes). Before replying or liking, fetch the live "
+        "record with atproto.get_record (using `uri`'s parts) and use ITS "
+        "cid, never the notification's. `marked_read` says whether the read "
+        "marker was updated; if `mark_read_error` is present, the "
+        "notifications were returned but NOT marked read. For read "
+        "notifications or other filters, use "
         f"atproto.query with {svc.list_nsid} and proxy '{svc.proxy}'."
     )
 

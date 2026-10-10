@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from collections.abc import Callable
 from pathlib import Path
@@ -158,9 +159,51 @@ def _wire_scheduler(executor: ToolExecutor, agent: Agent) -> None:
     if executor.scheduler is not None:
 
         async def on_schedule_fire(task_name: str, prompt: str) -> str:
+            # Persist the run's transcript to a per-schedule session so tool
+            # payloads (notification digests etc.) are auditable after the
+            # fact. The in-conversation run itself stays ephemeral — a fresh
+            # conversation per fire, like before.
+            store = executor.store
+            session_id = f"schedule-{task_name}"
+            on_message = None
+            if store is not None and store.chat is not None:
+                from src.agent.conversation import ConversationManager
+
+                conv_manager = ConversationManager(
+                    ctx=executor.ctx, llm_client=executor.llm_client
+                )
+                try:
+                    await store.chat.ensure_session(rkey=session_id, title=f"Schedule: {task_name}")
+                    await store.chat.create_message(
+                        session_id=session_id,
+                        sender="user",
+                        content=json.dumps(
+                            {"role": "user", "content": prompt}, default=str
+                        ),
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to persist scheduled prompt for '%s'; "
+                        "transcript persistence disabled for this run",
+                        task_name,
+                    )
+                else:
+                    async def _on_message(message: dict[str, Any]) -> None:
+                        try:
+                            await conv_manager.save_message(session_id, message)
+                        except Exception:
+                            logger.exception(
+                                "Failed to persist scheduled-run message for '%s'",
+                                task_name,
+                            )
+
+                    on_message = _on_message
+
             try:
                 response = await agent.chat(
-                    f"[Scheduled task: {task_name}] {prompt}", conversation=[]
+                    f"[Scheduled task: {task_name}] {prompt}",
+                    conversation=[],
+                    on_message=on_message,
                 )
             except Exception:
                 logger.exception("Scheduled task '%s' raised an exception", task_name)

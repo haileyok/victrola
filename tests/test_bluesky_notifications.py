@@ -215,8 +215,60 @@ async def test_notifications_are_compacted():
     assert n["author"] == {"did": "did:plc:fan0", "handle": "fan0.test", "displayName": "Fan 0"}
     assert n["reason"] == "reply"
     assert n["reason_subject"] == "at://did:plc:agent/app.bsky.feed.post/abc"
-    assert n["record"] == {"$type": "app.bsky.feed.post", "text": "hi 0"}
+    assert n["record"] == {"text": "hi 0"}
     assert "avatar" not in json.dumps(n)
+
+
+async def test_record_text_is_capped():
+    """Long post text is capped so batches fit under the tool-result cap."""
+    view = FakeAppView(1, seen_at=T0 - timedelta(seconds=1))
+    long_text = "x" * 2000
+    view.notifs[0]["record"] = {
+        "$type": "app.bsky.feed.post",
+        "text": long_text,
+        "createdAt": _iso(T0),
+        "langs": ["en"],
+        "facets": [{"type": "link"}],
+        "reply": {
+            "root": {"uri": "at://did:plc:agent/app.bsky.feed.post/root", "cid": "c1"},
+            "parent": {"uri": "at://did:plc:agent/app.bsky.feed.post/parent", "cid": "c2"},
+        },
+        "embed": {"images": [{"alt": "big"}]},
+    }
+    result = await bs.get_notifications(_ctx(view))
+    record = result["notifications"][0]["record"]
+    assert record["text"].startswith("x" * (bs._RECORD_TEXT_CAP - 1))
+    assert record["text"].endswith("…")
+    assert len(record["text"]) == bs._RECORD_TEXT_CAP
+    # reply refs survive; facets/embeds/$type are dropped
+    assert record["reply"]["parent"]["uri"] == "at://did:plc:agent/app.bsky.feed.post/parent"
+    assert record["createdAt"] == _iso(T0)
+    assert record["langs"] == ["en"]
+    assert "facets" not in record and "embed" not in record and "$type" not in record
+
+
+async def test_compact_batch_fits_tool_result_cap():
+    """A typical batch (several notifications) fits under the agent's tool-result cap."""
+    import src.agent.agent as agent_mod
+
+    view = FakeAppView(5, seen_at=T0 - timedelta(seconds=1))
+    # make each record realistically large (long text, facets, embeds)
+    for i in range(5):
+        view.notifs[i]["record"] = {
+            "$type": "app.bsky.feed.post",
+            "text": f"reply {i} " + "y" * 900,
+            "createdAt": _iso(T0 + timedelta(seconds=i)),
+            "langs": ["en"],
+            "facets": [{"index": {"byteStart": 0, "byteEnd": 5}, "features": [{"uri": "https://example.com"}]}],
+            "reply": {
+                "root": {"uri": "at://did:plc:agent/app.bsky.feed.post/root", "cid": "c1"},
+                "parent": {"uri": "at://did:plc:agent/app.bsky.feed.post/parent", "cid": "c2"},
+            },
+        }
+    result = await bs.get_notifications(_ctx(view))
+    rendered = str(result)
+    assert len(rendered) < agent_mod.MAX_TOOL_RESULT_LENGTH
+    assert "(truncated)" not in rendered
 
 
 async def test_list_failure_is_reported():
