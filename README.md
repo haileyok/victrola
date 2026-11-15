@@ -140,6 +140,14 @@ uv run python main.py engram-sync    # copies existing episodic/factual memories
 
 Open the approval link in a browser **signed in as the agent's account**; until you do, the appview can't index the space and searches use local vectors. Then restart. Settings: `ENGRAM_SPACE_URI` (overrides the space `engram-setup` saved), `ENGRAM_APPVIEW_URL` (default `https://api.engram.garden`), `ENGRAM_SYNC_INTERVAL_SECONDS` (default 300, 0 disables the background sync).
 
+The client speaks the **November 12, 2026 Spaces alpha**, and so must everything it talks to:
+
+- The account's PDS has to be on it (Cocoon `6f5f1f5` or later). Cocoon migrates its old space tables when it starts, so an existing space keeps working; the old and new credential and MAC formats are incompatible in both directions, so an older PDS fails outright.
+- The space is a member-list space (`com.atproto.memberspace.policy`) on the agent's account: only members read it, and the appview reads it through the authority's grant.
+- The account needs a `#atproto_kem` key in its DID document, which every read with a credential is checked against. An upgraded Cocoon backfills one for the accounts it hosts; on another host, publish it from `getRecommendedDidCredentials`.
+
+If one of those is missing, `engram-setup`, `engram-sync` and the background sync say which one it is.
+
 ### Web UI
 
 Memory entries can also be managed through the web interface at `/memory`, which provides browse, search, create, edit, and delete alongside the `memory.*` agent tools.

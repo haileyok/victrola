@@ -15,7 +15,7 @@ import engram_garden as eg
 import numpy as np
 import pytest
 
-from src.memory.engram import MAX_TEXT_BYTES, EngramSync, parse_tags, tags_for
+from src.memory.engram import MAX_TEXT_BYTES, EngramSync, _no_model_declared, parse_tags, space_problem, tags_for
 from src.memory.search import SearchEngine
 from src.store.store import Store
 
@@ -458,3 +458,41 @@ async def test_the_sync_loop_survives_an_unindexed_space(env):
     # flush ran before the pull failed, so the entry made it to the space
     assert await store.memory.get_engram_uri(e["id"]) is not None
     assert "UnknownSpace" in sync.last_error
+
+
+def test_space_problem_says_what_to_do():
+    kem = eg.EngramError(
+        "reading the space's config: did:plc:penny publishes no #atproto_kem key, so its space repos can't be read"
+    )
+    assert "#atproto_kem" in space_problem(kem)
+    assert "ATPROTO_APP_PASSWORD" in space_problem(eg.SignInExpiredError("token refresh failed"))
+    assert "engram-setup" in space_problem(eg.EngramError("404 UnknownSpace: this service does not index that space"))
+    assert "engram-setup" in space_problem(eg.EngramError("403 SpaceNotFound: no such space"))
+    assert space_problem("some other failure") == "some other failure"
+
+
+def test_only_a_missing_config_record_means_setup_declares_the_model():
+    missing = eg.EngramError("the space hasn't declared an embedding model yet")
+    missing.__cause__ = eg.XrpcError(404, "RecordNotFound")
+    assert _no_model_declared(missing)
+    refused = eg.EngramError("reading the space's config: did:plc:penny publishes no #atproto_kem key")
+    assert not _no_model_declared(refused)
+
+
+async def test_the_sync_loop_explains_a_missing_kem_key(env, caplog):
+    import asyncio
+
+    store, spaces, sync, _ = env
+
+    async def no_kem(*a, **kw):
+        raise eg.EngramError(
+            "reading the space's config: did:plc:penny publishes no #atproto_kem key, so its space repos can't be read"
+        )
+
+    spaces.list = no_kem
+    with caplog.at_level("WARNING"):
+        task = asyncio.create_task(sync.run(0.01))
+        await asyncio.sleep(0.1)
+        _ = task.cancel()
+    assert "#atproto_kem" in sync.last_error
+    assert any("#atproto_kem" in r.getMessage() for r in caplog.records)

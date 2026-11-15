@@ -6,6 +6,13 @@ mirrors them: it keeps the integer ids the memory tools use, powers keyword
 search and the web UI, and holds writes that couldn't be pushed yet. The agent
 never sees any of this; it keeps calling memory.add / search / update / delete.
 
+The space speaks the November 12, 2026 ATProto Spaces alpha, as both Cocoon
+(the PDS) and the appview do: it is a member-list space
+(`com.atproto.memberspace.policy`), a read presents a `Atproto-Space-Credential`
+bound to a P-256 key, and the host authenticates what it served with a MAC keyed
+to the account's `#atproto_kem` key. Older peers fail outright rather than
+degrade, so the PDS and the appview have to move together.
+
 How an entry maps to a space record:
   - text      <- content
   - tags      <- `type:<type>`, `scope:<scope>`, then the entry's own tags
@@ -96,6 +103,33 @@ def _parse_time(s: str) -> datetime | None:
         return datetime.fromisoformat(s)
     except (TypeError, ValueError):
         return None
+
+
+def space_problem(err: BaseException | str) -> str:
+    """What to do about a failure from the space, for the log and the `engram-*` commands."""
+    msg = err if isinstance(err, str) else str(err)
+    low = msg.lower()
+    if "no #atproto_kem" in low:
+        return (
+            f"{msg}. Reads with a credential are MAC-checked against the account's #atproto_kem key: "
+            "an upgraded Cocoon backfills one for the accounts it hosts, and on any other host the "
+            "account has to publish it from getRecommendedDidCredentials"
+        )
+    if isinstance(err, eg.SignInExpiredError):
+        return f"{msg} (update ATPROTO_APP_PASSWORD)"
+    if "UnknownSpace" in msg:
+        # Not an error to repeat: the space's owner hasn't approved the appview yet.
+        return "the appview doesn't index the memory space yet: run `main.py engram-setup` for the approval link"
+    if "SpaceNotFound" in msg or "RepoNotFound" in msg:
+        return f"the memory space is gone, or this account can't read it any more ({msg}): run `main.py engram-setup`"
+    return msg
+
+
+def _no_model_declared(err: BaseException) -> bool:
+    """Whether a model read failed because the space has no config record (rather than, say, a refused
+    credential), in which case setup declares one."""
+    cause = err.__cause__
+    return isinstance(cause, eg.XrpcError) and cause.name in ("RecordNotFound", "RepoNotFound")
 
 
 class EngramSync:
@@ -273,10 +307,9 @@ class EngramSync:
             except Exception as e:  # noqa: BLE001
                 self.last_error = str(e)
                 if "UnknownSpace" in str(e):
-                    # Not an error to repeat: the space's owner hasn't approved the appview yet.
-                    logger.info("Engram: the appview doesn't index the memory space yet (run engram-setup for the approval link)")
+                    logger.info("Engram: %s", space_problem(e))
                 else:
-                    logger.warning("Engram sync failed: %s", e)
+                    logger.warning("Engram sync failed: %s", space_problem(e))
             await asyncio.sleep(interval)
 
     # -- search --
@@ -392,7 +425,11 @@ async def setup_space(store: Any, secret_manager: Any, name: str = DEFAULT_SPACE
         declared = False
         try:
             model = (await spaces.model(space=uri)).model
-        except EngramError:
+        except EngramError as e:
+            # Only a missing config record means it's ours to declare: a read the host
+            # refused (no #atproto_kem key, a rejected credential) isn't fixed by writing one.
+            if not _no_model_declared(e):
+                raise
             model = (await spaces.set_model(action=eg.lex.DECLARE, space=uri, model=CONFIG.embedding_model)).model
             declared = True
         await save_space_uri(store, uri)
