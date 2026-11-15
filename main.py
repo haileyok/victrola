@@ -507,12 +507,15 @@ async def _engram_cli_context():
 @click.option("--name", default="memory", show_default=True, help="the space's name (its key)")
 def engram_setup(name: str):
     """Create the agent's memory space on her account and declare its embedding model."""
-    from src.memory.engram import setup_space
+    from src.memory.engram import setup_space, space_problem
 
     async def run():
         store, secrets = await _engram_cli_context()
         try:
-            r = await setup_space(store, secrets, name)
+            try:
+                r = await setup_space(store, secrets, name)
+            except Exception as e:  # noqa: BLE001 - the command reports what to fix
+                raise click.ClickException(space_problem(e)) from e
         finally:
             await store.close()
         print(f"space:    {r['uri']}" + ("  (created)" if r["created"] else "  (already existed)"))
@@ -533,7 +536,7 @@ def engram_setup(name: str):
 @click.option("--limit", type=int, default=0, help="push at most this many entries (0 = all)")
 def engram_sync(limit: int):
     """Push memories not yet in the memory space (all of them, the first time), then pull any it has that we don't."""
-    from src.memory.engram import open_sync
+    from src.memory.engram import open_sync, space_problem
 
     async def run():
         store, secrets = await _engram_cli_context()
@@ -555,12 +558,10 @@ def engram_sync(limit: int):
                     added = await sync.pull()
                     print(f"pulled {added} entries from the space; {await store.memory.count_unpushed()} still to push")
                 except Exception as e:  # noqa: BLE001
-                    print(f"couldn't read the space back: {e}")
-                    if "UnknownSpace" in str(e):
-                        print("(the appview isn't indexing it yet: run `main.py engram-setup` for the approval link)")
+                    print(f"couldn't read the space back: {space_problem(e)}")
                     print(f"{await store.memory.count_unpushed()} still to push")
                 if sync.last_error:
-                    print(f"last error: {sync.last_error}")
+                    print(f"last error: {space_problem(sync.last_error)}")
             finally:
                 await sync.aclose()
         finally:
